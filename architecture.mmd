@@ -1,0 +1,154 @@
+---
+title: FS3 ETL Data Pipeline — Full Architecture Flow (Elite Edition v2)
+---
+
+flowchart TD
+
+    %% ─── EXTERNAL SOURCES ───────────────────────────────────────────────
+    subgraph MACHINES["🏭 CMM Machines (External)"]
+        M1["Machine: KTSF-0453\nMitutoyo HD — Hall D"]
+        M2["Machine: KTS-7106\nMitutoyo BL — Hall A"]
+        CONV["Conversion Mapping Folder\n(3次元HD変換表)"]
+    end
+
+    %% ─── STARTUP ────────────────────────────────────────────────────────
+    subgraph BOOT["⚡ System Startup  (main.py)"]
+        CFG["ConfigLoader\nReads machines.json\nparts_3d.json\ndb_config.json"]
+        POOL["DatabaseHandler\nSingleton\nThreadedConnectionPool\n(2–15 connections)"]
+        CLEANUP["★ _cleanup_stale_tasks()\nFIX Scenario 5\nResets PROCESSING→PENDING\non every restart"]
+    end
+
+    %% ─── ORCHESTRATOR ────────────────────────────────────────────────────
+    subgraph ORCH["🎛️ Orchestrator (job_runner.py)"]
+        JR["Job Runner\nPolling Threads × Machine\n+ Conversion Watcher Thread"]
+        LOCK["Conversion Lock\n(threading.Event)\nBlocks queue during mapping import"]
+        DISP["Dispatcher\nMatches filename →\nparts_3d.json rule\n(re.IGNORECASE)"]
+        POOL_EXEC["ThreadPoolExecutor\nShared worker pool"]
+        DLQ_WATCH["★ DLQ Retry Watcher Thread\nFIX Scenario 6\nPolls dlq_status=RETRYING\nevery 15s"]
+    end
+
+    %% ─── ATOMIC CLAIM ─────────────────────────────────────────────────────
+    subgraph CLAIM["🔒 Atomic File Claim (StatusManager)"]
+        REGISTER["★ register()\nFIX Scenario 1\nINSERT ... ON CONFLICT\npartial unique index\n→ returns log_id or NULL"]
+    end
+
+    %% ─── PIPELINES ───────────────────────────────────────────────────────
+    subgraph PIPE["🔁 Pipeline Execution (pipeline_3d.py)"]
+        P3D["Pipeline3D\nCoordinates step sequence\nHolds DB connection\nfor LOAD transaction"]
+        subgraph STEPS["Steps (in order)"]
+            S1["① COPY\ncopy.py\nStability check\nDuplicate detection\nMove → _processing"]
+            S2["② TRANSFORM\ntransform.py\nRead CSV / Excel\nParse rows via config"]
+            subgraph TXN["★ Single Atomic Transaction — FIX Scenario 3"]
+                S3["③ LOAD\nload.py\nStaging insert (no commit)\nMaster UPSERT  (no commit)\nTransaction insert (no commit)\n↓\nconn.commit() OR conn.rollback()"]
+            end
+            S4["④ FINALIZE\nfinalize.py\nMove → _completed\nor → _NG + DLQ entry"]
+        end
+    end
+
+    %% ─── DATABASE ────────────────────────────────────────────────────────
+    subgraph DB["🗄️ PostgreSQL — Schema fs3"]
+        DL["pre_l_3d_dldate\nDuplicate detection log"]
+        STG_HD["pre_f_3d_hd\nStaging — HD data"]
+        STG_BL["pre_f_3d_bl\nStaging — BL data"]
+        MASTER["pre_m_cmm\n★ Master Table\nMeasurement definitions"]
+        TRANS["pre_t_cmm\n★ Transaction Table\nMeasurement values"]
+        CONV_W["pre_w_3d_hd\nConversion staging"]
+        ETL_LOG["etl_pipeline_log\n★ PARTIAL UNIQUE INDEX\nidx_pipeline_active_file\nPENDING → PROCESSING\n→ COMPLETED / FAILED"]
+        ETL_DLQ["etl_dlq\nDead Letter Queue\nAWAITING_REVIEW\n→ RETRYING → RESOLVED"]
+        ETL_AUDIT["etl_audit_log\nStructured event log"]
+    end
+
+    %% ─── FILE FOLDERS ─────────────────────────────────────────────────────
+    subgraph FOLDERS["📁 File Routing (Symbol-Free)"]
+        F_SRC["Source Folder\n(CMM output)"]
+        F_PROC["_processing/\n(active run)"]
+        F_DONE["_completed/\n(success)"]
+        F_NG["_NG/\n(failure — inspect + retry)"]
+    end
+
+    %% ─── DASHBOARD ────────────────────────────────────────────────────────
+    subgraph DASH["🖥️ Mission Control Dashboard"]
+        BTN["★ Retry Button\nFIX Scenario 6\n1. Move file _NG→src\n2. Reset log→PENDING\n3. DLQ→RETRYING"]
+    end
+
+    %% ─── NORMAL FLOW CONNECTIONS ─────────────────────────────────────────
+    M1 --> F_SRC
+    M2 --> F_SRC
+    CONV --> LOCK
+
+    main.py --> CFG
+    main.py --> POOL
+    main.py --> JR
+    main.py --> CLEANUP
+
+    CLEANUP -->|"Reset stale rows"| ETL_LOG
+
+    JR --> LOCK
+    JR --> DISP
+    JR --> POOL_EXEC
+    JR --> DLQ_WATCH
+    POOL_EXEC --> P3D
+
+    DISP -->|"Reads rules"| CFG
+
+    F_SRC -->|"Detected by watcher"| DISP
+    DISP --> REGISTER
+    REGISTER -->|"Atomic INSERT\nON CONFLICT DO NOTHING"| ETL_LOG
+    REGISTER -->|"log_id → proceed"| P3D
+
+    P3D --> S1
+    S1 --> S2
+    S2 --> S3
+    S3 --> S4
+
+    S1 -->|"Stability check + register"| DL
+    S1 --> F_PROC
+    S3 -->|"Staging insert"| STG_HD
+    S3 -->|"Staging insert"| STG_BL
+    S3 -->|"UPSERT — RC bug fix"| MASTER
+    S3 -->|"Final values"| TRANS
+    S4 -->|"Success"| F_DONE
+    S4 -->|"Failure"| F_NG
+    S4 -->|"Failure → DLQ entry"| ETL_DLQ
+
+    LOCK -->|"Conversion import"| CONV_W
+    CONV_W -->|"UPDATE metadata"| MASTER
+
+    StatusManager -->|"State updates"| ETL_LOG
+    StatusManager -->|"Audit events"| ETL_AUDIT
+    P3D --> StatusManager
+
+    POOL -.-|"Shared pool"| S1
+    POOL -.-|"Shared pool"| S3
+    POOL -.-|"Shared pool"| StatusManager
+
+    %% ─── DLQ RETRY FLOW ─────────────────────────────────────────────────
+    DASH --> BTN
+    BTN -->|"1. shutil.move()"| F_NG
+    F_NG -->|"File moved back"| F_SRC
+    BTN -->|"2. status=PENDING"| ETL_LOG
+    BTN -->|"3. dlq_status=RETRYING"| ETL_DLQ
+    DLQ_WATCH -->|"Poll RETRYING every 15s"| ETL_DLQ
+    DLQ_WATCH -->|"Mark RESOLVED\n(atomic claim)"| ETL_DLQ
+    DLQ_WATCH -->|"Submit with existing_log_id"| P3D
+
+    %% ─── STYLES ──────────────────────────────────────────────────────────
+    classDef critical   fill:#c0392b,color:#fff,stroke:#922b21
+    classDef elitefix   fill:#27ae60,color:#fff,stroke:#1e8449
+    classDef config     fill:#2980b9,color:#fff,stroke:#1a5276
+    classDef audit      fill:#8e44ad,color:#fff,stroke:#6c3483
+    classDef txn        fill:#e67e22,color:#fff,stroke:#ca6f1e
+    classDef dashboard  fill:#16a085,color:#fff,stroke:#0e6655
+
+    class MASTER critical
+    class TRANS critical
+    class S3 txn
+    class TXN txn
+    class CFG config
+    class ETL_AUDIT audit
+    class REGISTER elitefix
+    class CLEANUP elitefix
+    class DLQ_WATCH elitefix
+    class BTN dashboard
+    class ETL_LOG elitefix
+    class ETL_DLQ audit
