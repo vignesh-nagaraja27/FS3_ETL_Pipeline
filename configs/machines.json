@@ -1,0 +1,54 @@
+{
+  "_readme": "=========================================================================",
+  "_readme_1": " MACHINE CONFIGURATION FILE",
+  "_readme_2": " =========================================================================",
+  "_readme_3": " This file defines EVERY physical CMM machine and the folders it watches.",
+  "_readme_4": "",
+  "_readme_5": " HOW TO ADD A NEW MACHINE:",
+  "_readme_6": " 1. Copy one of the existing objects inside 'watch_directories'.",
+  "_readme_7": " 2. Set 'machine_id' to a unique identifier for the new machine.",
+  "_readme_8": " 3. Set 'source_path' to the root folder where CMM output files land.",
+  "_readme_9": " 4. Set 'pipeline_type' to '3D_HD', '3D_BL', or 'CHECKSHEET'.",
+  "_readme_10": " 5. Adjust poll_interval_sec and max_workers based on the machine's output rate.",
+  "_readme_11": " 6. Save and restart the service. No Python code changes needed.",
+  "_readme_12": " =========================================================================",
+
+  "watch_directories": [
+    {
+      "machine_id": "KTSF-0453",
+      "description": "Mitutoyo CMM - Hall D, Line 3 - Produces 3D HD (Henkei Data) measurement files.",
+      "source_path": "C:/CMM/Mitutoyo/KTSF-0453/Bigdata",
+      "pipeline_type": "3D_HD",
+      "poll_interval_sec": 5,
+      "stable_wait_sec": 2,
+      "stable_required_count": 3,
+      "max_workers": 2,
+      "enabled": true
+    },
+    {
+      "machine_id": "KTS-7106",
+      "description": "Mitutoyo CMM - Hall A, Line 1 - Produces 3D BL (Baseline) measurement files.",
+      "source_path": "C:/CMM/Mitutoyo/KTS-7106",
+      "pipeline_type": "3D_BL",
+      "poll_interval_sec": 5,
+      "stable_wait_sec": 2,
+      "stable_required_count": 3,
+      "max_workers": 2,
+      "enabled": true
+    }
+  ],
+
+  "conversion_watch": {
+    "description": "Folder watched for new conversion/mapping Excel sheets (3D HD Henkanhyou). When a new file lands here, the orchestrator imports it into pre_m_cmm BEFORE releasing the main pipeline queue.",
+    "path": "C:/FS3/DataCollect/18_3次元HD変換表",
+    "poll_interval_sec": 10,
+    "enabled": true
+  },
+
+  "processing_folders": {
+    "description": "Staging folders used during pipeline execution. The system moves files through these instead of renaming them with symbols.",
+    "processing": "C:/FS3/DataCollect/_processing",
+    "completed": "C:/FS3/DataCollect/_completed",
+    "ng": "C:/FS3/DataCollect/_NG"
+  }
+}

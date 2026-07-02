@@ -1,0 +1,31 @@
+{
+  "_readme": "=========================================================================",
+  "_readme_1": " CHECKSHEET PARTS CONFIGURATION FILE",
+  "_readme_2": " =========================================================================",
+  "_readme_3": " Same structure as parts_3d.json but for Checksheet-type measurement files.",
+  "_readme_4": "",
+  "_readme_5": " HOW TO ADD A NEW CHECKSHEET PART: (Same process as parts_3d.json)",
+  "_readme_6": " 1. Get a sample filename from the operator.",
+  "_readme_7": " 2. Build a 'match_pattern' that uniquely matches that filename.",
+  "_readme_8": " 3. Fill in all fields and save. Restart the service.",
+  "_readme_9": " =========================================================================",
+
+  "mappings": [
+    {
+      "match_pattern": "^CS_RC_",
+      "description": "Checksheet for Model RC - Visual inspection sheet",
+      "vehicle_model": "RC",
+      "parts_code": "CS-BODY",
+      "op_no": "OP010",
+      "vpo_code": "VPO-CS-RC",
+      "parser": {
+        "file_type": "excel",
+        "header_row": 2,
+        "data_start_row": 3,
+        "value_column_idx": 4,
+        "measure_no_col_idx": 0,
+        "excel_sheet_index": 0
+      }
+    }
+  ]
+}
