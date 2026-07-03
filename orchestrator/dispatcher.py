@@ -17,8 +17,8 @@ To support a new file type, you add a rule to the JSON, not here.
 from pathlib import Path
 from typing import Optional, Tuple
 
-from ETL_Pipeline.config_loader import ConfigLoader
-from ETL_Pipeline.utils.logger import LOGGER
+from config_loader import ConfigLoader
+from utils.logger import LOGGER
 
 
 # Identifies the pipeline type based on dispatch result
@@ -70,7 +70,7 @@ class Dispatcher:
                 f"Classified as '{pipeline_type}': {filename}",
                 model=match_3d.get("vehicle_model"),
                 part=match_3d.get("parts_code"),
-                op=match_3d.get("op_no")
+                op=match_3d.get("op_no"),
             )
             return pipeline_type, match_3d
 
@@ -82,7 +82,7 @@ class Dispatcher:
                 f"Classified as '{pipeline_type}': {filename}",
                 model=match_cs.get("vehicle_model"),
                 part=match_cs.get("parts_code"),
-                op=match_cs.get("op_no")
+                op=match_cs.get("op_no"),
             )
             return pipeline_type, match_cs
 

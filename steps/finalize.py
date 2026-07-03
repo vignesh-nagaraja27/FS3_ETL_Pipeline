@@ -17,7 +17,7 @@ After this step, the StatusManager marks the pipeline run as COMPLETED or FAILED
 import shutil
 from pathlib import Path
 
-from ETL_Pipeline.utils.logger import LOGGER
+from utils.logger import LOGGER
 
 
 class FinalizeStep:
@@ -43,17 +43,21 @@ class FinalizeStep:
         parts_code: str,
         op_no: str,
         log_id: int,
-        pipeline_type: str
+        pipeline_type: str,
     ) -> Path:
         """
         Moves the original source file to '<base_completed_dir>/<pipeline_type>/<vehicle_model>/<parts_code>/OK'
         and removes the staged processing copy on success.
         """
-        context = dict(machine=machine_id, model=vehicle_model, part=parts_code, op=op_no)
-        dest_dir = self._base_completed_dir / pipeline_type / vehicle_model / parts_code / "OK"
+        context = dict(
+            machine=machine_id, model=vehicle_model, part=parts_code, op=op_no
+        )
+        dest_dir = (
+            self._base_completed_dir / pipeline_type / vehicle_model / parts_code / "OK"
+        )
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest_path = self._move(source_path, dest_dir, "OK", context, log_id)
-        
+
         # Clean up the staged processing copy
         self._cleanup_staged(processing_path, context, log_id)
         return dest_path
@@ -67,13 +71,15 @@ class FinalizeStep:
         parts_code: str,
         op_no: str,
         log_id: int,
-        pipeline_type: str
+        pipeline_type: str,
     ) -> Path:
         """
         Moves the original source file to '<base_ng_dir>/<pipeline_type>/<vehicle_model>/<parts_code>/NG'
         and removes the staged processing copy on failure.
         """
-        context = dict(machine=machine_id, model=vehicle_model, part=parts_code, op=op_no)
+        context = dict(
+            machine=machine_id, model=vehicle_model, part=parts_code, op=op_no
+        )
         dest_dir = self._base_ng_dir / pipeline_type / vehicle_model / parts_code / "NG"
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest_path = self._move(source_path, dest_dir, "NG", context, log_id)
@@ -88,7 +94,7 @@ class FinalizeStep:
         destination_dir: Path,
         outcome: str,
         context: dict,
-        log_id: int
+        log_id: int,
     ) -> Path:
         """
         Internal helper to physically move the original file and log the result.
@@ -100,7 +106,7 @@ class FinalizeStep:
                 LOGGER.warning(
                     f"[LOG_ID:{log_id}] FINALIZE STEP: Original file '{file_path.name}' does not exist "
                     f"at source folder '{file_path}'. Cannot move original.",
-                    **context
+                    **context,
                 )
                 return dest_path
 
@@ -108,7 +114,7 @@ class FinalizeStep:
             LOGGER.info(
                 f"[LOG_ID:{log_id}] FINALIZE STEP: Original file '{file_path.name}' → [{outcome}] "
                 f"Moved from CMM folder to '{dest_path}'.",
-                **context
+                **context,
             )
             return dest_path
 
@@ -116,7 +122,8 @@ class FinalizeStep:
             LOGGER.error(
                 f"[LOG_ID:{log_id}] FINALIZE STEP: Failed to move original file '{file_path.name}' "
                 f"to '{destination_dir}'. Error: {e}",
-                exc_info=True, **context
+                exc_info=True,
+                **context,
             )
             raise
 
@@ -127,7 +134,12 @@ class FinalizeStep:
         if processing_path and processing_path.exists():
             try:
                 processing_path.unlink()
-                LOGGER.info(f"[LOG_ID:{log_id}] FINALIZE STEP: Staged workspace file '{processing_path.name}' removed.", **context)
+                LOGGER.info(
+                    f"[LOG_ID:{log_id}] FINALIZE STEP: Staged workspace file '{processing_path.name}' removed.",
+                    **context,
+                )
             except Exception as e:
-                LOGGER.warning(f"[LOG_ID:{log_id}] FINALIZE STEP: Failed to remove staged file '{processing_path}': {e}", **context)
-
+                LOGGER.warning(
+                    f"[LOG_ID:{log_id}] FINALIZE STEP: Failed to remove staged file '{processing_path}': {e}",
+                    **context,
+                )

@@ -34,18 +34,17 @@
   "_readme_32": "",
   "_readme_33": " 4. Save this file. No Python code changes are needed. Restart the service.",
   "_readme_34": " =========================================================================",
-
   "mappings": [
     {
-      "match_pattern": "^193E_R",
+      "match_pattern": "^193E",
       "description": "Model RC - Right Hand Side - Operation 010 (Mitutoyo KTSF-0453 output)",
       "vehicle_model": "RC",
       "parts_code": "HD-RH",
-      "side": "R",
+      "side": "RH",
       "op_no": "OP010",
-      "vpo_code": "VPO-RC-R10",
+      "vpo_code": "RC_HD-RH_OP010",
       "parser": {
-        "file_type": "excel",
+        "file_type": "csv",
         "header_row": 10,
         "data_start_row": 11,
         "value_column_idx": 7,
@@ -68,40 +67,6 @@
         "value_column_idx": 7,
         "measure_no_col_idx": 12,
         "excel_sheet_index": -1
-      }
-    },
-    {
-      "match_pattern": "^NX_R",
-      "description": "Model NX - Right Hand Side - Operation 020",
-      "vehicle_model": "NX",
-      "parts_code": "HD-RH",
-      "side": "R",
-      "op_no": "OP020",
-      "vpo_code": "VPO-NX-R20",
-      "parser": {
-        "file_type": "csv",
-        "header_row": 0,
-        "data_start_row": 1,
-        "value_column_idx": 5,
-        "measure_no_col_idx": 0,
-        "excel_sheet_index": 0
-      }
-    },
-    {
-      "match_pattern": "^NX_L",
-      "description": "Model NX - Left Hand Side - Operation 020",
-      "vehicle_model": "NX",
-      "parts_code": "HD-LH",
-      "side": "L",
-      "op_no": "OP020",
-      "vpo_code": "VPO-NX-L20",
-      "parser": {
-        "file_type": "csv",
-        "header_row": 0,
-        "data_start_row": 1,
-        "value_column_idx": 5,
-        "measure_no_col_idx": 0,
-        "excel_sheet_index": 0
       }
     }
   ]

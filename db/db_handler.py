@@ -10,9 +10,10 @@ the pool is strictly returned, even in the event of unexpected exceptions.
 """
 
 import threading
-import psycopg2
+
+# import psycopg2
 from psycopg2.pool import ThreadedConnectionPool
-from ETL_Pipeline.utils.logger import LOGGER
+from utils.logger import LOGGER
 
 
 class DatabaseHandler:
@@ -20,6 +21,7 @@ class DatabaseHandler:
     Singleton class managing the PostgreSQL ThreadedConnectionPool.
     Ensures only a single connection pool is instantiated throughout the system lifetime.
     """
+
     _instance = None
     _lock = threading.Lock()
 
@@ -52,7 +54,7 @@ class DatabaseHandler:
                     port=db_config.get("port", 5432),
                     dbname=db_config.get("dbname"),
                     user=db_config.get("user"),
-                    password=db_config.get("password")
+                    password=db_config.get("password"),
                 )
                 self._initialized = True
                 LOGGER.info("Database Connection Pool successfully initialized.")
@@ -72,7 +74,9 @@ class DatabaseHandler:
                     cur.execute("SELECT ...")
         """
         if not self._initialized:
-            raise RuntimeError("DatabaseHandler connection pool is not initialized. Call initialize() first.")
+            raise RuntimeError(
+                "DatabaseHandler connection pool is not initialized. Call initialize() first."
+            )
 
         return ConnectionContext(self._pool)
 
@@ -92,6 +96,7 @@ class ConnectionContext:
     """
     Context manager to handle safe connection borrowing, transactions, and pool returns.
     """
+
     def __init__(self, pool: ThreadedConnectionPool):
         self.pool = pool
         self.conn = None

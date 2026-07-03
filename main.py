@@ -25,10 +25,10 @@ from pathlib import Path
 # Ensure the project root is on the Python path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from ETL_Pipeline.config_loader import ConfigLoader
-from ETL_Pipeline.db.db_handler import DatabaseHandler
-from ETL_Pipeline.orchestrator.job_runner import JobRunner
-from ETL_Pipeline.utils.logger import LOGGER
+from config_loader import ConfigLoader
+from db.db_handler import DatabaseHandler
+from orchestrator.job_runner import JobRunner
+from utils.logger import LOGGER
 
 
 def main():
@@ -55,7 +55,9 @@ def main():
         )
         sys.exit(1)
     except Exception as e:
-        LOGGER.critical(f"STARTUP FAILED: Error loading configuration: {e}", exc_info=True)
+        LOGGER.critical(
+            f"STARTUP FAILED: Error loading configuration: {e}", exc_info=True
+        )
         sys.exit(1)
 
     # ── STEP 2: Initialize Database Connection Pool ──────────────────────────
@@ -66,7 +68,7 @@ def main():
         db_handler.initialize(
             db_config=db_config["db"],
             min_conn=pool_config.get("min_conn", 2),
-            max_conn=pool_config.get("max_conn", 15)
+            max_conn=pool_config.get("max_conn", 15),
         )
         LOGGER.info(
             f"Database connection pool initialized. "
@@ -83,7 +85,7 @@ def main():
         LOGGER.critical(
             f"STARTUP FAILED: Could not connect to the database. "
             f"Verify 'configs/db_config.json' credentials. Error: {e}",
-            exc_info=True
+            exc_info=True,
         )
         sys.exit(1)
 

@@ -1,10 +1,10 @@
 {
   "db": {
-    "host": "YOUR_DB_HOST",
+    "host": "172.23.64.27",
     "port": 5432,
-    "dbname": "YOUR_DB_NAME",
-    "user": "YOUR_DB_USER",
-    "password": "YOUR_DB_PASSWORD"
+    "dbname": "uat_db",
+    "user": "fs3",
+    "password": "toyota"
   },
   "pool": {
     "min_conn": 2,

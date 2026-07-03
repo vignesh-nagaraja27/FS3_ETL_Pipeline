@@ -56,11 +56,16 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from ETL_Pipeline.config_loader import ConfigLoader
-from ETL_Pipeline.db.db_handler import DatabaseHandler
-from ETL_Pipeline.orchestrator.dispatcher import Dispatcher, PIPELINE_3D_HD, PIPELINE_3D_BL, PIPELINE_UNKNOWN
-from ETL_Pipeline.pipelines.pipeline_3d import Pipeline3D
-from ETL_Pipeline.utils.logger import LOGGER
+from config_loader import ConfigLoader
+from db.db_handler import DatabaseHandler
+from orchestrator.dispatcher import (
+    Dispatcher,
+    PIPELINE_3D_HD,
+    PIPELINE_3D_BL,
+    PIPELINE_UNKNOWN,
+)
+from pipelines.pipeline_3d import Pipeline3D
+from utils.logger import LOGGER
 
 # File extensions we process. Anything else is ignored. CASE-INSENSITIVE via .lower() below.
 SUPPORTED_EXTENSIONS = {".csv", ".xlsx", ".xls", ".xlsm"}
@@ -79,7 +84,7 @@ class JobRunner:
         Args:
             config (ConfigLoader): The global configuration object loaded at startup.
         """
-        self._config     = config
+        self._config = config
         self._dispatcher = Dispatcher(config)
         self._stop_event = threading.Event()
 
@@ -138,7 +143,7 @@ class JobRunner:
                 target=self._watch_machine_folder,
                 args=(machine_config,),
                 name=f"Watcher-{machine_config.get('machine_id')}",
-                daemon=True
+                daemon=True,
             )
             t.start()
             threads.append(t)
@@ -154,17 +159,17 @@ class JobRunner:
                 target=self._watch_conversion_folder,
                 args=(conv_config,),
                 name="Watcher-ConversionTable",
-                daemon=True
+                daemon=True,
             )
             t_conv.start()
             threads.append(t_conv)
-            LOGGER.info(f"Conversion table watcher started → '{conv_config.get('path')}'.")
+            LOGGER.info(
+                f"Conversion table watcher started → '{conv_config.get('path')}'."
+            )
 
         # Start the DLQ retry watcher thread (Scenario 6 fix)
         t_dlq = threading.Thread(
-            target=self._watch_dlq_retrying,
-            name="Watcher-DLQ-Retry",
-            daemon=True
+            target=self._watch_dlq_retrying, name="Watcher-DLQ-Retry", daemon=True
         )
         t_dlq.start()
         threads.append(t_dlq)
@@ -176,7 +181,9 @@ class JobRunner:
             while not self._stop_event.is_set():
                 time.sleep(1)
         except KeyboardInterrupt:
-            LOGGER.info("Shutdown signal received (Ctrl+C). Stopping all watchers gracefully...")
+            LOGGER.info(
+                "Shutdown signal received (Ctrl+C). Stopping all watchers gracefully..."
+            )
             self.stop()
 
     def stop(self):
@@ -228,7 +235,9 @@ class JobRunner:
                     f"Affected: {[r[1] for r in stale_rows]}"
                 )
             else:
-                LOGGER.info("STARTUP CLEANUP: No stale PROCESSING records found. System is clean.")
+                LOGGER.info(
+                    "STARTUP CLEANUP: No stale PROCESSING records found. System is clean."
+                )
 
         except Exception as e:
             # Non-fatal — log and continue. Worst case: some files won't be auto-retried
@@ -281,7 +290,14 @@ class JobRunner:
                         retrying_entries = cur.fetchall()
 
                 for entry in retrying_entries:
-                    dlq_id, file_name, machine_id, pipeline_log_id, retry_count, max_retries = entry
+                    (
+                        dlq_id,
+                        file_name,
+                        machine_id,
+                        pipeline_log_id,
+                        retry_count,
+                        max_retries,
+                    ) = entry
 
                     # Deduplication guard: skip if already submitted in this session
                     with self._dlq_id_lock:
@@ -298,9 +314,12 @@ class JobRunner:
 
                     # Find the machine configuration for this entry
                     machine_config = next(
-                        (m for m in self._config.get_watch_directories()
-                         if m.get("machine_id") == machine_id),
-                        None
+                        (
+                            m
+                            for m in self._config.get_watch_directories()
+                            if m.get("machine_id") == machine_id
+                        ),
+                        None,
                     )
                     if not machine_config:
                         LOGGER.warning(
@@ -344,14 +363,16 @@ class JobRunner:
                     )
                     self._executor.submit(
                         self._run_pipeline_retry_safe,
-                        file_path, part_config, machine_config,
-                        int(pipeline_log_id), int(dlq_id)
+                        file_path,
+                        part_config,
+                        machine_config,
+                        int(pipeline_log_id),
+                        int(dlq_id),
                     )
 
             except Exception as e:
                 LOGGER.error(
-                    f"[DLQ-WATCHER] Error in DLQ retry watcher loop: {e}",
-                    exc_info=True
+                    f"[DLQ-WATCHER] Error in DLQ retry watcher loop: {e}", exc_info=True
                 )
 
             time.sleep(DLQ_POLL_INTERVAL)
@@ -388,7 +409,7 @@ class JobRunner:
         part_config: dict,
         machine_config: dict,
         pipeline_log_id: int,
-        dlq_id: int
+        dlq_id: int,
     ):
         """
         Wrapper for DLQ retry pipeline runs. Uses the existing log entry (no new row).
@@ -401,7 +422,7 @@ class JobRunner:
                 source_path=file_path,
                 part_config=part_config,
                 machine_config=machine_config,
-                existing_log_id=pipeline_log_id  # ← Reuse existing log entry
+                existing_log_id=pipeline_log_id,  # ← Reuse existing log entry
             )
             LOGGER.info(
                 f"[DLQ-WATCHER] Retry SUCCEEDED for '{file_path.name}'. "
@@ -414,20 +435,23 @@ class JobRunner:
             LOGGER.error(
                 f"[DLQ-WATCHER] Retry FAILED for '{file_path.name}' "
                 f"(DLQ ID: {dlq_id}). Error: {e}",
-                exc_info=True
+                exc_info=True,
             )
             # Re-push to AWAITING_REVIEW so operator sees the failure in dashboard
             try:
                 db = DatabaseHandler()
                 with db.get_connection() as conn:
                     with conn.cursor() as cur:
-                        cur.execute("""
+                        cur.execute(
+                            """
                             UPDATE fs3.etl_dlq
                             SET dlq_status   = 'AWAITING_REVIEW',
                                 error_message = %s,
                                 last_retry_at = NOW()
                             WHERE id = %s;
-                        """, (str(e)[:2000], dlq_id))
+                        """,
+                            (str(e)[:2000], dlq_id),
+                        )
                 LOGGER.warning(
                     f"[DLQ-WATCHER] DLQ entry {dlq_id} re-queued as AWAITING_REVIEW "
                     f"after failed retry."
@@ -452,14 +476,14 @@ class JobRunner:
         Polling rather than OS file events is intentional — CMM machines write files
         over network shares where OS file events are unreliable.
         """
-        source_path   = Path(machine_config["source_path"])
-        machine_id    = machine_config.get("machine_id")
+        source_path = Path(machine_config["source_path"])
+        machine_id = machine_config.get("machine_id")
         poll_interval = machine_config.get("poll_interval_sec", 5)
         seen_files: set = set()
 
         LOGGER.info(
             f"[MC:{machine_id}] Watcher active. Polling every {poll_interval}s.",
-            machine=machine_id
+            machine=machine_id,
         )
 
         while not self._stop_event.is_set():
@@ -471,7 +495,7 @@ class JobRunner:
                     LOGGER.warning(
                         f"[MC:{machine_id}] Source folder '{source_path}' not found. "
                         f"Will retry next poll. Check that the drive/network path is accessible.",
-                        machine=machine_id
+                        machine=machine_id,
                     )
                     time.sleep(poll_interval)
                     continue
@@ -497,7 +521,7 @@ class JobRunner:
                         LOGGER.warning(
                             f"[MC:{machine_id}] '{file_path.name}' was not recognized by any rule. "
                             f"Skipping. Add a 'match_pattern' in 'configs/parts_3d.json' to handle it.",
-                            machine=machine_id
+                            machine=machine_id,
                         )
                         continue
 
@@ -505,7 +529,7 @@ class JobRunner:
                     if not self._conversion_lock.is_set():
                         LOGGER.info(
                             f"[MC:{machine_id}] Pausing '{file_path.name}' — conversion import in progress.",
-                            machine=machine_id
+                            machine=machine_id,
                         )
                         self._conversion_lock.wait()
 
@@ -514,15 +538,15 @@ class JobRunner:
                     # duplicate check — so this submit() is safe even if two machines
                     # somehow detect the same file.
                     self._executor.submit(
-                        self._run_pipeline_safe,
-                        file_path, part_config, machine_config
+                        self._run_pipeline_safe, file_path, part_config, machine_config
                     )
 
             except Exception as e:
                 LOGGER.error(
                     f"[MC:{machine_id}] Unexpected error in watcher loop: {e}. "
                     f"Watcher will continue polling.",
-                    machine=machine_id, exc_info=True
+                    machine=machine_id,
+                    exc_info=True,
                 )
 
             time.sleep(poll_interval)
@@ -533,7 +557,7 @@ class JobRunner:
         When a new file arrives, it blocks the measurement pipeline queue (via _conversion_lock),
         imports the mapping, then releases the lock to resume normal processing.
         """
-        conv_path     = Path(conv_config["path"])
+        conv_path = Path(conv_config["path"])
         poll_interval = conv_config.get("poll_interval_sec", 10)
         seen_files: set = set()
 
@@ -560,10 +584,15 @@ class JobRunner:
                     finally:
                         # Always release the lock — even if import fails
                         self._conversion_lock.set()
-                        LOGGER.info("[CONVERSION] Conversion import complete. Measurement queue released.")
+                        LOGGER.info(
+                            "[CONVERSION] Conversion import complete. Measurement queue released."
+                        )
 
             except Exception as e:
-                LOGGER.error(f"[CONVERSION] Error in conversion watcher loop: {e}.", exc_info=True)
+                LOGGER.error(
+                    f"[CONVERSION] Error in conversion watcher loop: {e}.",
+                    exc_info=True,
+                )
                 self._conversion_lock.set()  # Safety: always release lock on error
 
             time.sleep(poll_interval)
@@ -584,17 +613,20 @@ class JobRunner:
                     cur.execute("TRUNCATE TABLE fs3.pre_w_3d_hd;")
 
                     for _, row in df.iterrows():
-                        cur.execute("""
+                        cur.execute(
+                            """
                             INSERT INTO fs3.pre_w_3d_hd
                                 (version, vpo_code, measure_no, evaluation_item1)
                             VALUES (%s, %s, %s, %s)
                             ON CONFLICT DO NOTHING;
-                        """, (
-                            str(row.get("version", "")),
-                            str(row.get("vpo_code", "")),
-                            int(row.get("measure_no", 0)),
-                            str(row.get("evaluation_item1", ""))
-                        ))
+                        """,
+                            (
+                                str(row.get("version", "")),
+                                str(row.get("vpo_code", "")),
+                                int(row.get("measure_no", 0)),
+                                str(row.get("evaluation_item1", "")),
+                            ),
+                        )
 
                     cur.execute("""
                         UPDATE fs3.pre_m_cmm m
@@ -605,13 +637,15 @@ class JobRunner:
                           AND m.version    = w.version;
                     """)
 
-            LOGGER.info(f"[CONVERSION] Successfully imported '{file_path.name}' into pre_m_cmm.")
+            LOGGER.info(
+                f"[CONVERSION] Successfully imported '{file_path.name}' into pre_m_cmm."
+            )
 
         except Exception as e:
             LOGGER.error(
                 f"[CONVERSION] Failed to import '{file_path.name}'. "
                 f"Master table (pre_m_cmm) was NOT updated. Error: {e}",
-                exc_info=True
+                exc_info=True,
             )
             raise
 
@@ -619,7 +653,9 @@ class JobRunner:
     # Pipeline execution helpers
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _run_pipeline_safe(self, file_path: Path, part_config: dict, machine_config: dict):
+    def _run_pipeline_safe(
+        self, file_path: Path, part_config: dict, machine_config: dict
+    ):
         """
         Wrapper that catches any top-level exception from a normal (non-retry) pipeline run.
         Prevents one bad file from crashing the entire worker thread.
@@ -631,7 +667,7 @@ class JobRunner:
                 self._pipeline_3d.run(
                     source_path=file_path,
                     part_config=part_config,
-                    machine_config=machine_config
+                    machine_config=machine_config,
                 )
                 self._increment_registry_counter(machine_id, success=True)
             else:
@@ -642,7 +678,7 @@ class JobRunner:
         except Exception as e:
             LOGGER.error(
                 f"Unhandled top-level pipeline error for '{file_path.name}': {e}",
-                exc_info=True
+                exc_info=True,
             )
             self._increment_registry_counter(machine_id, success=False)
 
@@ -657,7 +693,7 @@ class JobRunner:
                         f"UPDATE fs3.etl_machine_registry "
                         f"SET {column} = {column} + 1, updated_at = NOW() "
                         f"WHERE machine_id = %s;",
-                        (machine_id,)
+                        (machine_id,),
                     )
         except Exception:
             pass  # Counter update failure is never worth crashing the pipeline
@@ -687,14 +723,19 @@ class JobRunner:
             db = DatabaseHandler()
             with db.get_connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute(sql, (
-                        machine_config.get("machine_id"),
-                        machine_config.get("description", ""),
-                        machine_config.get("pipeline_type", "3D_HD"),
-                        machine_config.get("source_path", ""),
-                        machine_config.get("enabled", True)
-                    ))
-            LOGGER.info(f"[MC:{machine_config.get('machine_id')}] Registered in machine registry.")
+                    cur.execute(
+                        sql,
+                        (
+                            machine_config.get("machine_id"),
+                            machine_config.get("description", ""),
+                            machine_config.get("pipeline_type", "3D_HD"),
+                            machine_config.get("source_path", ""),
+                            machine_config.get("enabled", True),
+                        ),
+                    )
+            LOGGER.info(
+                f"[MC:{machine_config.get('machine_id')}] Registered in machine registry."
+            )
         except Exception as e:
             LOGGER.warning(
                 f"[MC:{machine_config.get('machine_id')}] Could not update machine registry: {e}"
@@ -713,7 +754,7 @@ class JobRunner:
                         "UPDATE fs3.etl_machine_registry "
                         "SET last_seen_at = NOW(), updated_at = NOW() "
                         "WHERE machine_id = %s;",
-                        (machine_id,)
+                        (machine_id,),
                     )
         except Exception:
             pass
@@ -753,4 +794,3 @@ class JobRunner:
         except Exception as e:
             LOGGER.error(f"Error checking file processed state for '{file_name}': {e}")
             return False
-

@@ -55,23 +55,25 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-from ETL_Pipeline.db.db_handler import DatabaseHandler
-from ETL_Pipeline.utils.logger import LOGGER
+from db.db_handler import DatabaseHandler
+from utils.logger import LOGGER
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Enums
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class PipelineStatus(str, Enum):
     """
     The lifecycle states a file can be in.
     Using str mixin so the value can be stored directly as a VARCHAR in PostgreSQL.
     """
-    PENDING    = "PENDING"     # File detected, not yet processed
+
+    PENDING = "PENDING"  # File detected, not yet processed
     PROCESSING = "PROCESSING"  # Actively being worked on by the pipeline
-    COMPLETED  = "COMPLETED"   # Successfully inserted into master/transaction tables
-    FAILED     = "FAILED"      # Processing failed; file is in the NG folder
+    COMPLETED = "COMPLETED"  # Successfully inserted into master/transaction tables
+    FAILED = "FAILED"  # Processing failed; file is in the NG folder
 
 
 class DLQCategory(str, Enum):
@@ -79,17 +81,19 @@ class DLQCategory(str, Enum):
     Categorizes why a file failed — powers the DLQ filter in the dashboard.
     New categories can be added here and in the schema CHECK constraint.
     """
-    SCHEMA_DRIFT       = "SCHEMA_DRIFT"
-    DB_TIMEOUT         = "DB_TIMEOUT"
-    VALIDATION_FAILED  = "VALIDATION_FAILED"
-    FILE_NOT_FOUND     = "FILE_NOT_FOUND"
-    PARSE_ERROR        = "PARSE_ERROR"
-    UNKNOWN            = "UNKNOWN"
+
+    SCHEMA_DRIFT = "SCHEMA_DRIFT"
+    DB_TIMEOUT = "DB_TIMEOUT"
+    VALIDATION_FAILED = "VALIDATION_FAILED"
+    FILE_NOT_FOUND = "FILE_NOT_FOUND"
+    PARSE_ERROR = "PARSE_ERROR"
+    UNKNOWN = "UNKNOWN"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # StatusManager
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class StatusManager:
     """
@@ -100,9 +104,9 @@ class StatusManager:
     what an operator sees on screen.
     """
 
-    TABLE_LOG   = "fs3.etl_pipeline_log"
+    TABLE_LOG = "fs3.etl_pipeline_log"
     TABLE_AUDIT = "fs3.etl_audit_log"
-    TABLE_DLQ   = "fs3.etl_dlq"
+    TABLE_DLQ = "fs3.etl_dlq"
 
     def __init__(self):
         self._db = DatabaseHandler()
@@ -119,7 +123,7 @@ class StatusManager:
         vehicle_model: str = None,
         parts_code: str = None,
         op_no: str = None,
-        pid: int = None
+        pid: int = None,
     ) -> Optional[int]:
         """
         Atomically claims a file for processing using a PostgreSQL server-side lock.
@@ -164,10 +168,18 @@ class StatusManager:
         try:
             with self._db.get_connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute(sql, (
-                        file_name, file_size, machine_id, vehicle_model,
-                        parts_code, op_no, pid
-                    ))
+                    cur.execute(
+                        sql,
+                        (
+                            file_name,
+                            file_size,
+                            machine_id,
+                            vehicle_model,
+                            parts_code,
+                            op_no,
+                            pid,
+                        ),
+                    )
                     result = cur.fetchone()
 
             if result is None:
@@ -176,14 +188,20 @@ class StatusManager:
                 LOGGER.info(
                     f"File '{file_name}' already claimed by an active worker "
                     f"(PENDING/PROCESSING). Skipping — no duplicate processing.",
-                    machine=machine_id, model=vehicle_model, part=parts_code, op=op_no
+                    machine=machine_id,
+                    model=vehicle_model,
+                    part=parts_code,
+                    op=op_no,
                 )
                 return None
 
             log_id = result[0]
             LOGGER.info(
                 f"[LOG_ID:{log_id}] File '{file_name}' atomically claimed as PENDING.",
-                machine=machine_id, model=vehicle_model, part=parts_code, op=op_no
+                machine=machine_id,
+                model=vehicle_model,
+                part=parts_code,
+                op=op_no,
             )
             self._write_audit(
                 level="INFO",
@@ -192,8 +210,11 @@ class StatusManager:
                     f"(size: {file_size} bytes) registered — pipeline starting."
                 ),
                 pipeline_log_id=log_id,
-                machine_id=machine_id, vehicle_model=vehicle_model,
-                parts_code=parts_code, op_no=op_no, current_step="REGISTER"
+                machine_id=machine_id,
+                vehicle_model=vehicle_model,
+                parts_code=parts_code,
+                op_no=op_no,
+                current_step="REGISTER",
             )
             return log_id
 
@@ -201,8 +222,11 @@ class StatusManager:
             LOGGER.error(
                 f"Failed to register file '{file_name}' in pipeline log. "
                 f"Cannot proceed without a log ID — pipeline aborted. Error: {e}",
-                machine=machine_id, model=vehicle_model, part=parts_code, op=op_no,
-                exc_info=True
+                machine=machine_id,
+                model=vehicle_model,
+                part=parts_code,
+                op=op_no,
+                exc_info=True,
             )
             raise
 
@@ -225,7 +249,7 @@ class StatusManager:
         machine: str = None,
         model: str = None,
         part: str = None,
-        op: str = None
+        op: str = None,
     ):
         """
         ═══════════════════════════════════════════════════════════
@@ -257,7 +281,10 @@ class StatusManager:
             LOGGER.info(
                 f"[LOG_ID:{log_id}] DLQ RETRY: Existing log entry reset to PROCESSING. "
                 f"Re-running pipeline for this file.",
-                machine=machine, model=model, part=part, op=op
+                machine=machine,
+                model=model,
+                part=part,
+                op=op,
             )
             self._write_audit(
                 level="INFO",
@@ -266,8 +293,11 @@ class StatusManager:
                     f"from FAILED to PROCESSING. File has been moved back to source folder."
                 ),
                 pipeline_log_id=log_id,
-                machine_id=machine, vehicle_model=model,
-                parts_code=part, op_no=op, current_step="DLQ_RETRY"
+                machine_id=machine,
+                vehicle_model=model,
+                parts_code=part,
+                op_no=op,
+                current_step="DLQ_RETRY",
             )
         except Exception as e:
             LOGGER.warning(
@@ -281,7 +311,7 @@ class StatusManager:
         machine: str = None,
         model: str = None,
         part: str = None,
-        op: str = None
+        op: str = None,
     ):
         """
         Transitions a log entry to PROCESSING and records the active step name.
@@ -294,14 +324,20 @@ class StatusManager:
         self._update_log(log_id, PipelineStatus.PROCESSING, current_step=step_name)
         LOGGER.info(
             f"[LOG_ID:{log_id}] Step [{step_name}] → PROCESSING.",
-            machine=machine, model=model, part=part, op=op
+            machine=machine,
+            model=model,
+            part=part,
+            op=op,
         )
         self._write_audit(
             level="INFO",
             message=f"[LOG_ID:{log_id}] Step [{step_name}] started.",
             pipeline_log_id=log_id,
-            machine_id=machine, vehicle_model=model,
-            parts_code=part, op_no=op, current_step=step_name
+            machine_id=machine,
+            vehicle_model=model,
+            parts_code=part,
+            op_no=op,
+            current_step=step_name,
         )
 
     def set_completed(
@@ -310,20 +346,24 @@ class StatusManager:
         machine: str = None,
         model: str = None,
         part: str = None,
-        op: str = None
+        op: str = None,
     ):
         """
         Marks a pipeline run as COMPLETED and computes the total processing time.
         Called after the FINALIZE step succeeds and the file is in its final folder.
         """
         self._update_log(
-            log_id, PipelineStatus.COMPLETED,
+            log_id,
+            PipelineStatus.COMPLETED,
             completed_at=datetime.utcnow(),
-            compute_duration=True
+            compute_duration=True,
         )
         LOGGER.info(
             f"[LOG_ID:{log_id}] Pipeline run → COMPLETED successfully.",
-            machine=machine, model=model, part=part, op=op
+            machine=machine,
+            model=model,
+            part=part,
+            op=op,
         )
         self._write_audit(
             level="INFO",
@@ -332,8 +372,11 @@ class StatusManager:
                 f"file committed to master and transaction tables."
             ),
             pipeline_log_id=log_id,
-            machine_id=machine, vehicle_model=model,
-            parts_code=part, op_no=op, current_step="FINALIZE"
+            machine_id=machine,
+            vehicle_model=model,
+            parts_code=part,
+            op_no=op,
+            current_step="FINALIZE",
         )
 
     def set_failed(
@@ -348,7 +391,7 @@ class StatusManager:
         file_path: str = None,
         file_name: str = None,
         exc: Exception = None,
-        dlq_category: DLQCategory = DLQCategory.UNKNOWN
+        dlq_category: DLQCategory = DLQCategory.UNKNOWN,
     ):
         """
         Marks a pipeline run as FAILED, writes an ERROR audit entry, and pushes
@@ -369,7 +412,10 @@ class StatusManager:
         LOGGER.error(
             f"[LOG_ID:{log_id}] Pipeline run → FAILED at [{failed_step or 'UNKNOWN'}]. "
             f"Reason: {error_message}",
-            machine=machine, model=model, part=part, op=op
+            machine=machine,
+            model=model,
+            part=part,
+            op=op,
         )
 
         # Write ERROR entry to audit log
@@ -380,10 +426,12 @@ class StatusManager:
                 f"Reason: {error_message}"
             ),
             pipeline_log_id=log_id,
-            machine_id=machine, vehicle_model=model,
-            parts_code=part, op_no=op,
+            machine_id=machine,
+            vehicle_model=model,
+            parts_code=part,
+            op_no=op,
             current_step=failed_step,
-            traceback=traceback_str
+            traceback=traceback_str,
         )
 
         # Push to DLQ
@@ -399,7 +447,7 @@ class StatusManager:
                 failed_step=failed_step,
                 error_category=dlq_category.value,
                 error_message=error_message,
-                traceback=traceback_str
+                traceback=traceback_str,
             )
 
     def write_warning(
@@ -410,7 +458,7 @@ class StatusManager:
         model: str = None,
         part: str = None,
         op: str = None,
-        step: str = None
+        step: str = None,
     ):
         """
         Writes a WARNING audit entry without changing the pipeline status.
@@ -421,8 +469,11 @@ class StatusManager:
             level="WARNING",
             message=message,
             pipeline_log_id=log_id,
-            machine_id=machine, vehicle_model=model,
-            parts_code=part, op_no=op, current_step=step
+            machine_id=machine,
+            vehicle_model=model,
+            parts_code=part,
+            op_no=op,
+            current_step=step,
         )
 
     def write_critical(
@@ -434,21 +485,26 @@ class StatusManager:
         part: str = None,
         op: str = None,
         step: str = None,
-        exc: Exception = None
+        exc: Exception = None,
     ):
         """
         Writes a CRITICAL audit entry. Use for system-level failures (startup, DB down).
         These appear highlighted in the dashboard's Audit Logs view.
         """
         traceback_str = tb_module.format_exc() if exc else None
-        LOGGER.critical(message, machine=machine, model=model, part=part, op=op, exc_info=bool(exc))
+        LOGGER.critical(
+            message, machine=machine, model=model, part=part, op=op, exc_info=bool(exc)
+        )
         self._write_audit(
             level="CRITICAL",
             message=message,
             pipeline_log_id=log_id,
-            machine_id=machine, vehicle_model=model,
-            parts_code=part, op_no=op, current_step=step,
-            traceback=traceback_str
+            machine_id=machine,
+            vehicle_model=model,
+            parts_code=part,
+            op_no=op,
+            current_step=step,
+            traceback=traceback_str,
         )
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -462,7 +518,7 @@ class StatusManager:
         current_step: str = None,
         error_message: str = None,
         completed_at: datetime = None,
-        compute_duration: bool = False
+        compute_duration: bool = False,
     ):
         """
         Applies a status update to etl_pipeline_log. Also computes processing_sec
@@ -495,7 +551,7 @@ class StatusManager:
             # Do NOT re-raise — a status update failure must not crash the pipeline
             LOGGER.error(
                 f"[LOG_ID:{log_id}] Failed to update pipeline log status to '{status}': {e}",
-                exc_info=True
+                exc_info=True,
             )
 
     def _write_audit(
@@ -508,7 +564,7 @@ class StatusManager:
         parts_code: str = None,
         op_no: str = None,
         current_step: str = None,
-        traceback: str = None
+        traceback: str = None,
     ):
         """
         Inserts one row into etl_audit_log.
@@ -523,13 +579,21 @@ class StatusManager:
         try:
             with self._db.get_connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute(sql, (
-                        level, pipeline_log_id, machine_id, vehicle_model,
-                        parts_code, op_no, current_step,
-                        message[:4000],  # Guard against very long messages
-                        traceback,
-                        os.getpid()
-                    ))
+                    cur.execute(
+                        sql,
+                        (
+                            level,
+                            pipeline_log_id,
+                            machine_id,
+                            vehicle_model,
+                            parts_code,
+                            op_no,
+                            current_step,
+                            message[:4000],  # Guard against very long messages
+                            traceback,
+                            os.getpid(),
+                        ),
+                    )
         except Exception as e:
             # Fallback: write to file logger only — don't propagate
             LOGGER.warning(f"Audit log write failed (non-critical): {e}")
@@ -546,7 +610,7 @@ class StatusManager:
         failed_step: str,
         error_category: str,
         error_message: str,
-        traceback: Optional[str]
+        traceback: Optional[str],
     ):
         """
         Inserts a failed file into etl_dlq so it appears in the DLQ pillar
@@ -562,15 +626,27 @@ class StatusManager:
         try:
             with self._db.get_connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute(sql, (
-                        pipeline_log_id, file_name, file_path, machine_id,
-                        vehicle_model, parts_code, op_no, failed_step,
-                        error_category, error_message[:2000] if error_message else None,
-                        traceback
-                    ))
+                    cur.execute(
+                        sql,
+                        (
+                            pipeline_log_id,
+                            file_name,
+                            file_path,
+                            machine_id,
+                            vehicle_model,
+                            parts_code,
+                            op_no,
+                            failed_step,
+                            error_category,
+                            error_message[:2000] if error_message else None,
+                            traceback,
+                        ),
+                    )
             LOGGER.info(
                 f"[LOG_ID:{pipeline_log_id}] File '{file_name}' pushed to DLQ "
                 f"[{error_category}] for operator review."
             )
         except Exception as e:
-            LOGGER.warning(f"[LOG_ID:{pipeline_log_id}] Failed to push file to DLQ: {e}")
+            LOGGER.warning(
+                f"[LOG_ID:{pipeline_log_id}] Failed to push file to DLQ: {e}"
+            )

@@ -51,14 +51,14 @@ The UPSERT fix for that bug is preserved intact.
 from datetime import datetime
 from typing import List, Dict, Any
 
-from ETL_Pipeline.utils.logger import LOGGER
+from utils.logger import LOGGER
 
 
 # ── Table constants ──────────────────────────────────────────────────────────
-TABLE_STAGING_HD   = "fs3.pre_f_3d_hd"
-TABLE_STAGING_BL   = "fs3.pre_f_3d_bl"
-TABLE_MASTER       = "fs3.pre_m_cmm"
-TABLE_TRANSACTION  = "fs3.pre_t_cmm"
+TABLE_STAGING_HD = "fs3.pre_f_3d_hd"
+TABLE_STAGING_BL = "fs3.pre_f_3d_bl"
+TABLE_MASTER = "fs3.pre_m_cmm"
+TABLE_TRANSACTION = "fs3.pre_t_cmm"
 
 
 class LoadStep:
@@ -77,7 +77,9 @@ class LoadStep:
             pipeline_type (str): '3D_HD' or '3D_BL' — determines which staging table is used.
         """
         self._pipeline_type = pipeline_type
-        self._staging_table = TABLE_STAGING_HD if pipeline_type == "3D_HD" else TABLE_STAGING_BL
+        self._staging_table = (
+            TABLE_STAGING_HD if pipeline_type == "3D_HD" else TABLE_STAGING_BL
+        )
 
     def run(
         self,
@@ -85,8 +87,8 @@ class LoadStep:
         part_config: dict,
         machine_id: str,
         log_id: int,
-        conn,                      # ← SINGLE shared connection, owned by pipeline_3d.py
-        version: str = None
+        conn,  # ← SINGLE shared connection, owned by pipeline_3d.py
+        version: str = None,
     ) -> int:
         """
         Executes all staging, master, and transaction inserts within a SINGLE atomic
@@ -114,18 +116,20 @@ class LoadStep:
             Exception: Any DB error re-raised immediately to trigger rollback upstream.
         """
         vehicle_model = part_config.get("vehicle_model")
-        parts_code    = part_config.get("parts_code")
-        op_no         = part_config.get("op_no")
-        vpo_code      = part_config.get("vpo_code")
-        context       = dict(machine=machine_id, model=vehicle_model, part=parts_code, op=op_no)
+        parts_code = part_config.get("parts_code")
+        op_no = part_config.get("op_no")
+        vpo_code = part_config.get("vpo_code")
+        context = dict(
+            machine=machine_id, model=vehicle_model, part=parts_code, op=op_no
+        )
 
-        version   = version or datetime.utcnow().strftime("%Y%m%d")
+        version = version or datetime.utcnow().strftime("%Y%m%d")
         committed = 0
 
         LOGGER.info(
             f"[LOG_ID:{log_id}] LOAD STEP: Starting atomic batch. "
             f"{len(rows)} rows — staging → master → transaction (single transaction).",
-            **context
+            **context,
         )
 
         # ── SINGLE CURSOR for the entire file batch ────────────────────────────
@@ -134,7 +138,7 @@ class LoadStep:
         # ConnectionContext.__exit__ — NOT here.
         with conn.cursor() as cur:
             for i, row in enumerate(rows):
-                measure_no    = row.get("measure_no")
+                measure_no = row.get("measure_no")
                 measure_value = row.get("measure_value")
 
                 try:
@@ -143,12 +147,21 @@ class LoadStep:
 
                     # ── STAGE 2: Master Table (pre_m_cmm) — RC/OP010 fix ─────
                     self._upsert_master(
-                        cur, version, vpo_code, vehicle_model,
-                        parts_code, op_no, measure_no, log_id, context
+                        cur,
+                        version,
+                        vpo_code,
+                        vehicle_model,
+                        parts_code,
+                        op_no,
+                        measure_no,
+                        log_id,
+                        context,
                     )
 
                     # ── STAGE 3: Transaction Table (pre_t_cmm) ────────────────
-                    self._insert_transaction(cur, vpo_code, measure_no, measure_value, log_id, context)
+                    self._insert_transaction(
+                        cur, vpo_code, measure_no, measure_value, log_id, context
+                    )
 
                     committed += 1
 
@@ -158,11 +171,12 @@ class LoadStep:
                     # block in pipeline_3d.py, whose __exit__ calls conn.rollback().
                     # This guarantees: if row 47 of 200 fails, rows 1–46 are ALSO rolled back.
                     LOGGER.error(
-                        f"[LOG_ID:{log_id}] [ROW:{i+1}/{len(rows)}] "
+                        f"[LOG_ID:{log_id}] [ROW:{i + 1}/{len(rows)}] "
                         f"[MEASURE_NO:{measure_no}] LOAD STEP FAILED. "
                         f"ALL {committed} previously staged rows will ROLLBACK automatically. "
                         f"Root cause: {type(e).__name__}: {e}",
-                        exc_info=True, **context
+                        exc_info=True,
+                        **context,
                     )
                     raise  # ← Triggers conn.rollback() in pipeline_3d.py
 
@@ -170,7 +184,7 @@ class LoadStep:
             f"[LOG_ID:{log_id}] LOAD STEP: Atomic batch complete. "
             f"{committed}/{len(rows)} rows processed. "
             f"Awaiting pipeline commit signal.",
-            **context
+            **context,
         )
         return committed
 
@@ -189,13 +203,16 @@ class LoadStep:
             VALUES (%s, %s, %s, %s, %s, NOW())
             ON CONFLICT DO NOTHING;
         """
-        cur.execute(sql, (
-            row["vehicle_model"],
-            row["parts_code"],
-            row["op_no"],
-            row["measure_no"],
-            row["measure_value"]
-        ))
+        cur.execute(
+            sql,
+            (
+                row["vehicle_model"],
+                row["parts_code"],
+                row["op_no"],
+                row["measure_no"],
+                row["measure_value"],
+            ),
+        )
 
     def _upsert_master(
         self,
@@ -207,7 +224,7 @@ class LoadStep:
         op_no: str,
         measure_no: int,
         log_id: int,
-        context: dict
+        context: dict,
     ):
         """
         Inserts or updates the measurement DEFINITION row in pre_m_cmm.
@@ -232,10 +249,18 @@ class LoadStep:
                 parts_code    = EXCLUDED.parts_code,
                 op_no         = EXCLUDED.op_no;
         """
-        cur.execute(sql, (
-            version, vpo_code, vehicle_model, parts_code,
-            op_no, measure_no, evaluation_item1_placeholder
-        ))
+        cur.execute(
+            sql,
+            (
+                version,
+                vpo_code,
+                vehicle_model,
+                parts_code,
+                op_no,
+                measure_no,
+                evaluation_item1_placeholder,
+            ),
+        )
 
     def _insert_transaction(
         self,
@@ -244,7 +269,7 @@ class LoadStep:
         measure_no: int,
         measure_value: float,
         log_id: int,
-        context: dict
+        context: dict,
     ):
         """
         Inserts one measurement VALUE row into pre_t_cmm (the final transaction table).

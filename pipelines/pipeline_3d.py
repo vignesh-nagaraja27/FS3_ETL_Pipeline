@@ -46,13 +46,13 @@ All context (model, part, op, parser settings) flows in via 'part_config' from t
 import os
 from pathlib import Path
 
-from ETL_Pipeline.db.db_handler import DatabaseHandler
-from ETL_Pipeline.steps.copy import CopyStep
-from ETL_Pipeline.steps.transform import TransformStep
-from ETL_Pipeline.steps.load import LoadStep
-from ETL_Pipeline.steps.finalize import FinalizeStep
-from ETL_Pipeline.state.status_manager import StatusManager
-from ETL_Pipeline.utils.logger import LOGGER
+from db.db_handler import DatabaseHandler
+from steps.copy import CopyStep
+from steps.transform import TransformStep
+from steps.load import LoadStep
+from steps.finalize import FinalizeStep
+from state.status_manager import StatusManager
+from utils.logger import LOGGER
 
 
 class Pipeline3D:
@@ -71,12 +71,12 @@ class Pipeline3D:
                                        'processing', 'completed', and 'ng' folders.
         """
         self._status = StatusManager()
-        self._db     = DatabaseHandler()  # ← Shared Singleton pool for the LOAD transaction
-        self._copy_step      = CopyStep(processing_dir=processing_folders["processing"])
+        self._db = DatabaseHandler()  # ← Shared Singleton pool for the LOAD transaction
+        self._copy_step = CopyStep(processing_dir=processing_folders["processing"])
         self._transform_step = TransformStep()
-        self._finalize_step  = FinalizeStep(
+        self._finalize_step = FinalizeStep(
             base_completed_dir=processing_folders["completed"],
-            base_ng_dir=processing_folders["ng"]
+            base_ng_dir=processing_folders["ng"],
         )
 
     def run(
@@ -84,7 +84,7 @@ class Pipeline3D:
         source_path: Path,
         part_config: dict,
         machine_config: dict,
-        existing_log_id: int = None
+        existing_log_id: int = None,
     ):
         """
         Executes the full pipeline for one file.
@@ -97,15 +97,17 @@ class Pipeline3D:
                                    Used exclusively by the DLQ retry watcher (Scenario 6).
                                    If None (normal flow), register() atomically claims the file.
         """
-        machine_id    = machine_config.get("machine_id", "UNKNOWN")
+        machine_id = machine_config.get("machine_id", "UNKNOWN")
         vehicle_model = part_config.get("vehicle_model")
-        parts_code    = part_config.get("parts_code")
-        op_no         = part_config.get("op_no")
+        parts_code = part_config.get("parts_code")
+        op_no = part_config.get("op_no")
         pipeline_type = machine_config.get("pipeline_type", "3D_HD")
-        context       = dict(machine=machine_id, model=vehicle_model, part=parts_code, op=op_no)
+        context = dict(
+            machine=machine_id, model=vehicle_model, part=parts_code, op=op_no
+        )
 
         processing_path = None
-        log_id          = None
+        log_id = None
 
         # ── REGISTRATION / CLAIM ──────────────────────────────────────────────
         if existing_log_id is not None:
@@ -118,7 +120,7 @@ class Pipeline3D:
             LOGGER.info(
                 f"[LOG_ID:{log_id}] DLQ RETRY: Reusing existing log entry for "
                 f"'{source_path.name}'. Pipeline starting.",
-                **context
+                **context,
             )
 
         else:
@@ -138,13 +140,14 @@ class Pipeline3D:
                     vehicle_model=vehicle_model,
                     parts_code=parts_code,
                     op_no=op_no,
-                    pid=os.getpid()
+                    pid=os.getpid(),
                 )
             except Exception as e:
                 LOGGER.error(
                     f"3D PIPELINE: Could not register '{source_path.name}' in status log. "
                     f"Aborting to avoid untracked processing. Error: {e}",
-                    exc_info=True, **context
+                    exc_info=True,
+                    **context,
                 )
                 return
 
@@ -163,7 +166,7 @@ class Pipeline3D:
                 parts_code=parts_code,
                 op_no=op_no,
                 stable_wait_sec=machine_config.get("stable_wait_sec", 2.0),
-                stable_required_count=machine_config.get("stable_required_count", 3)
+                stable_required_count=machine_config.get("stable_required_count", 3),
             )
 
             # Update DB with the stable, finalized file size after writing to _processing
@@ -173,12 +176,14 @@ class Pipeline3D:
             except Exception as size_err:
                 LOGGER.warning(
                     f"[LOG_ID:{log_id}] Could not retrieve stable file size: {size_err}",
-                    **context
+                    **context,
                 )
 
         except FileExistsError:
             # Duplicate file — not a crash, clean skip with log
-            self._status.set_failed(log_id, "Duplicate file detected — already processed.", **context)
+            self._status.set_failed(
+                log_id, "Duplicate file detected — already processed.", **context
+            )
             return
         except Exception as e:
             self._status.set_failed(log_id, f"COPY STEP failed: {e}", **context)
@@ -191,18 +196,25 @@ class Pipeline3D:
                 file_path=processing_path,
                 part_config=part_config,
                 machine_id=machine_id,
-                log_id=log_id
+                log_id=log_id,
             )
         except Exception as e:
             LOGGER.error(
                 f"[LOG_ID:{log_id}] 3D PIPELINE: TRANSFORM STEP failed for "
                 f"'{processing_path.name}'. File will be moved to NG. Error: {e}",
-                exc_info=True, **context
+                exc_info=True,
+                **context,
             )
             self._status.set_failed(log_id, f"TRANSFORM STEP failed: {e}", **context)
             self._finalize_step.run_failure(
-                source_path, processing_path, machine_id,
-                vehicle_model, parts_code, op_no, log_id, pipeline_type
+                source_path,
+                processing_path,
+                machine_id,
+                vehicle_model,
+                parts_code,
+                op_no,
+                log_id,
+                pipeline_type,
             )
             return
 
@@ -232,7 +244,7 @@ class Pipeline3D:
                     part_config=part_config,
                     machine_id=machine_id,
                     log_id=log_id,
-                    conn=conn           # ← All 3 stages share this one connection
+                    conn=conn,  # ← All 3 stages share this one connection
                 )
             # === SINGLE ATOMIC TRANSACTION — END ==============================
             # If we reach here: conn.commit() was called. All rows are permanent.
@@ -249,12 +261,19 @@ class Pipeline3D:
                 f"[LOG_ID:{log_id}] 3D PIPELINE: LOAD STEP failed for "
                 f"'{processing_path.name}'. Full transaction rolled back. "
                 f"No data saved for this file. Error: {e}",
-                exc_info=True, **context
+                exc_info=True,
+                **context,
             )
             self._status.set_failed(log_id, f"LOAD STEP failed: {e}", **context)
             self._finalize_step.run_failure(
-                source_path, processing_path, machine_id,
-                vehicle_model, parts_code, op_no, log_id, pipeline_type
+                source_path,
+                processing_path,
+                machine_id,
+                vehicle_model,
+                parts_code,
+                op_no,
+                log_id,
+                pipeline_type,
             )
             return
 
@@ -263,13 +282,20 @@ class Pipeline3D:
             self._status.set_processing(log_id, "FINALIZE", **context)
             self._status.set_completed(log_id, **context)
             self._finalize_step.run_success(
-                source_path, processing_path, machine_id,
-                vehicle_model, parts_code, op_no, log_id, pipeline_type
+                source_path,
+                processing_path,
+                machine_id,
+                vehicle_model,
+                parts_code,
+                op_no,
+                log_id,
+                pipeline_type,
             )
         except Exception as e:
             LOGGER.error(
                 f"[LOG_ID:{log_id}] 3D PIPELINE: FINALIZE STEP failed. "
                 f"Data was committed to DB but file may remain in _processing. Error: {e}",
-                exc_info=True, **context
+                exc_info=True,
+                **context,
             )
             self._status.set_failed(log_id, f"FINALIZE STEP failed: {e}", **context)

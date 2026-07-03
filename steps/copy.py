@@ -20,8 +20,8 @@ import shutil
 import time
 from pathlib import Path
 
-from ETL_Pipeline.db.db_handler import DatabaseHandler
-from ETL_Pipeline.utils.logger import LOGGER
+from db.db_handler import DatabaseHandler
+from utils.logger import LOGGER
 
 
 # Tables used in this step
@@ -50,7 +50,7 @@ class CopyStep:
         parts_code: str,
         op_no: str,
         stable_wait_sec: float = 2.0,
-        stable_required_count: int = 3
+        stable_required_count: int = 3,
     ) -> Path:
         """
         Waits for the file to stabilize, checks for duplicates, then moves it
@@ -73,12 +73,16 @@ class CopyStep:
             FileExistsError: If the file is already registered in the DB (duplicate).
             RuntimeError: If the file never stabilizes within the timeout window.
         """
-        context = dict(machine=machine_id, model=vehicle_model, part=parts_code, op=op_no)
+        context = dict(
+            machine=machine_id, model=vehicle_model, part=parts_code, op=op_no
+        )
 
         LOGGER.info(f"COPY STEP started for '{source_path.name}'.", **context)
 
         # --- PHASE 1: Wait for file to become stable (not still being written) ---
-        stable_dest = self._wait_for_stable(source_path, stable_wait_sec, stable_required_count, context)
+        stable_dest = self._wait_for_stable(
+            source_path, stable_wait_sec, stable_required_count, context
+        )
         file_size = stable_dest
 
         # --- PHASE 2: Duplicate check via pre_l_3d_dldate ---
@@ -88,11 +92,15 @@ class CopyStep:
         dest_path = self._processing_dir / source_path.name
         try:
             shutil.copy2(str(source_path), str(dest_path))
-            LOGGER.info(f"COPY STEP: Copied '{source_path.name}' → '{dest_path}'. Original remains untouched.", **context)
+            LOGGER.info(
+                f"COPY STEP: Copied '{source_path.name}' → '{dest_path}'. Original remains untouched.",
+                **context,
+            )
         except Exception as e:
             LOGGER.error(
                 f"COPY STEP: Failed to copy file '{source_path.name}' to processing folder. Error: {e}",
-                exc_info=True, **context
+                exc_info=True,
+                **context,
             )
             raise
 
@@ -101,7 +109,9 @@ class CopyStep:
 
         return dest_path
 
-    def _wait_for_stable(self, path: Path, interval: float, required_count: int, context: dict) -> int:
+    def _wait_for_stable(
+        self, path: Path, interval: float, required_count: int, context: dict
+    ) -> int:
         """
         Polls the file size repeatedly until it stops changing for 'required_count' intervals.
         Returns the final stable file size in bytes.
@@ -123,7 +133,10 @@ class CopyStep:
             if current_size == last_size and current_size > 0:
                 stable_hits += 1
                 if stable_hits >= required_count:
-                    LOGGER.info(f"COPY STEP: File '{path.name}' is stable at {current_size} bytes.", **context)
+                    LOGGER.info(
+                        f"COPY STEP: File '{path.name}' is stable at {current_size} bytes.",
+                        **context,
+                    )
                     return current_size
             else:
                 stable_hits = 0
@@ -152,13 +165,21 @@ class CopyStep:
                             f"already exists in '{TABLE_DLDATA}'. Skipping to avoid re-import."
                         )
         except FileExistsError:
-            LOGGER.warning(f"COPY STEP: Skipping duplicate file '{file_name}'.", **context)
+            LOGGER.warning(
+                f"COPY STEP: Skipping duplicate file '{file_name}'.", **context
+            )
             raise
         except Exception as e:
-            LOGGER.error(f"COPY STEP: Error during duplicate check for '{file_name}': {e}", exc_info=True, **context)
+            LOGGER.error(
+                f"COPY STEP: Error during duplicate check for '{file_name}': {e}",
+                exc_info=True,
+                **context,
+            )
             raise
 
-    def _register_download(self, file_name: str, file_size: int, parts_code: str, context: dict):
+    def _register_download(
+        self, file_name: str, file_size: int, parts_code: str, context: dict
+    ):
         """
         Inserts a new row into pre_l_3d_dldate to mark this file as seen.
         """
@@ -171,11 +192,14 @@ class CopyStep:
             with self._db.get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(sql, (file_name, file_size, parts_code))
-            LOGGER.info(f"COPY STEP: Registered '{file_name}' in '{TABLE_DLDATA}'.", **context)
+            LOGGER.info(
+                f"COPY STEP: Registered '{file_name}' in '{TABLE_DLDATA}'.", **context
+            )
         except Exception as e:
             LOGGER.error(
                 f"COPY STEP: Failed to register '{file_name}' in '{TABLE_DLDATA}'. "
                 f"The file was moved but not recorded — may be re-processed next run. Error: {e}",
-                exc_info=True, **context
+                exc_info=True,
+                **context,
             )
             raise

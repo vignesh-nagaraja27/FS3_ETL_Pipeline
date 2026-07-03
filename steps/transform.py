@@ -20,7 +20,7 @@ from typing import List, Dict, Any
 
 import pandas as pd
 
-from ETL_Pipeline.utils.logger import LOGGER
+from utils.logger import LOGGER
 
 
 class TransformStep:
@@ -30,11 +30,7 @@ class TransformStep:
     """
 
     def run(
-        self,
-        file_path: Path,
-        part_config: dict,
-        machine_id: str,
-        log_id: int
+        self, file_path: Path, part_config: dict, machine_id: str, log_id: int
     ) -> List[Dict[str, Any]]:
         """
         Reads and transforms a file into a list of measurement row dicts.
@@ -56,7 +52,12 @@ class TransformStep:
         vehicle_model = part_config.get("vehicle_model")
         parts_code = part_config.get("parts_code")
         op_no = part_config.get("op_no")
-        context = dict(machine=machine_id, model=vehicle_model, part=parts_code, op=op_no)
+        context = dict(
+            machine=machine_id or "Unknown",
+            model=vehicle_model or "Unknown",
+            part=parts_code or "Unknown",
+            op=op_no or "Unknown",
+        )
 
         parser = part_config.get("parser", {})
         file_type = parser.get("file_type", "csv").lower()
@@ -68,17 +69,24 @@ class TransformStep:
 
         LOGGER.info(
             f"[LOG_ID:{log_id}] TRANSFORM STEP started. Reading '{file_path.name}' as '{file_type}'.",
-            **context
+            **context,
         )
 
         try:
             raw_df = self._read_file(
-                file_path, file_type, header_row, data_start_row, sheet_index, context, log_id
+                file_path,
+                file_type,
+                header_row,
+                data_start_row,
+                sheet_index,
+                context,
+                log_id,
             )
         except Exception as e:
             LOGGER.error(
                 f"[LOG_ID:{log_id}] TRANSFORM STEP: Failed to read '{file_path.name}'. Error: {e}",
-                exc_info=True, **context
+                exc_info=True,
+                **context,
             )
             raise
 
@@ -89,11 +97,13 @@ class TransformStep:
                 f"in 'configs/parts_3d.json'."
             )
 
-        rows = self._parse_rows(raw_df, part_config, value_col_idx, measure_no_col_idx, context, log_id)
+        rows = self._parse_rows(
+            raw_df, part_config, value_col_idx, measure_no_col_idx, context, log_id
+        )
 
         LOGGER.info(
             f"[LOG_ID:{log_id}] TRANSFORM STEP: Parsed {len(rows)} measurement rows from '{file_path.name}'.",
-            **context
+            **context,
         )
         return rows
 
@@ -105,30 +115,47 @@ class TransformStep:
         data_start_row: int,
         sheet_index: int,
         context: dict,
-        log_id: int
+        log_id: int,
     ) -> pd.DataFrame:
         """
         Reads the file into a pandas DataFrame based on its type.
         Uses 'header_row' and 'data_start_row' from the config, not guessing.
         """
-        skip_rows = list(range(header_row)) + list(range(header_row + 1, data_start_row))
+        skip_rows = list(range(header_row)) + list(
+            range(header_row + 1, data_start_row)
+        )
 
         if file_type == "csv":
-            df = pd.read_csv(file_path, header=header_row, encoding="utf-8-sig")
+            encodings = [
+                "utf-8-sig",
+                "cp932",
+                "shift_jis",
+            ]
+            last_error = None
+            for encoding in encodings:
+                try:
+                    df = pd.read_csv(file_path, header=header_row, encoding=encoding)
+                    LOGGER.info(
+                        f"[LOG_ID:{log_id}] TRANSFORM STEP: Successfully read "
+                        f"'{file_path.name}' using encoding '{encoding}'.",
+                        **context,
+                    )
+                    return df
+                except UnicodeDecodeError as e:
+                    last_error = e
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError(
+                f"[LOG_ID:{log_id}] Unable to read CSV file '{file_path.name}'."
+            )
         elif file_type in ("excel", "xlsx", "xls", "xlsm"):
             df = pd.read_excel(
-                file_path,
-                sheet_name=sheet_index,
-                header=header_row,
-                skiprows=skip_rows
+                file_path, sheet_name=sheet_index, header=header_row, skiprows=skip_rows
             )
-        else:
-            raise RuntimeError(
-                f"[LOG_ID:{log_id}] TRANSFORM STEP: Unrecognized file_type '{file_type}' "
-                f"in part config. Supported values: 'csv', 'excel'."
-            )
-
-        return df
+        raise RuntimeError(
+            f"[LOG_ID:{log_id}] TRANSFORM STEP: Unrecognized file_type '{file_type}' "
+            f"in part config. Supported values: 'csv', 'excel'."
+        )
 
     def _parse_rows(
         self,
@@ -137,7 +164,7 @@ class TransformStep:
         value_col_idx: int,
         measure_no_col_idx: int,
         context: dict,
-        log_id: int
+        log_id: int,
     ) -> List[Dict[str, Any]]:
         """
         Iterates the DataFrame rows and builds structured dicts for the load step.
@@ -158,31 +185,37 @@ class TransformStep:
                 measure_no = row.iloc[measure_no_col_idx]
 
                 # Skip rows where the measurement value is blank (NaN / empty)
-                if raw_value is None or (isinstance(raw_value, float) and math.isnan(raw_value)):
+                if raw_value is None or (
+                    isinstance(raw_value, float) and math.isnan(raw_value)
+                ):
                     skipped += 1
                     continue
 
-                rows.append({
-                    "vehicle_model": vehicle_model,
-                    "parts_code": parts_code,
-                    "op_no": op_no,
-                    "vpo_code": vpo_code,
-                    "side": side,
-                    "measure_no": int(measure_no) if measure_no is not None else None,
-                    "measure_value": float(raw_value),
-                })
+                rows.append(
+                    {
+                        "vehicle_model": vehicle_model,
+                        "parts_code": parts_code,
+                        "op_no": op_no,
+                        "vpo_code": vpo_code,
+                        "side": side,
+                        "measure_no": int(measure_no)
+                        if measure_no is not None
+                        else None,
+                        "measure_value": float(raw_value),
+                    }
+                )
 
             except (ValueError, IndexError) as e:
                 LOGGER.warning(
                     f"[LOG_ID:{log_id}] TRANSFORM STEP: Skipping malformed row {idx} — {e}",
-                    **context
+                    **context,
                 )
                 skipped += 1
 
         if skipped > 0:
             LOGGER.info(
                 f"[LOG_ID:{log_id}] TRANSFORM STEP: Skipped {skipped} blank/malformed rows (expected for sparse measurement files).",
-                **context
+                **context,
             )
 
         return rows
