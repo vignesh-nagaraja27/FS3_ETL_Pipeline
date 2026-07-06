@@ -48,7 +48,9 @@
         "header_row": 10,
         "data_start_row": 11,
         "value_column_idx": 7,
-        "measure_no_col_idx": 12,
+        "specification_column_idx": 4,
+        "upper_limit_column_idx": 5,
+        "lower_limit_column_idx": 6,
         "excel_sheet_index": -1
       }
     },
@@ -65,7 +67,6 @@
         "header_row": 10,
         "data_start_row": 11,
         "value_column_idx": 7,
-        "measure_no_col_idx": 12,
         "excel_sheet_index": -1
       }
     }

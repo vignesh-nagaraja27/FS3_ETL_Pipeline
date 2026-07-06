@@ -238,6 +238,21 @@ class Pipeline3D:
             load_step = LoadStep(pipeline_type=pipeline_type)
 
             # === SINGLE ATOMIC TRANSACTION — START ===========================
+            # Log first transformed row for debugging version propagation
+            try:
+                LOGGER.info(
+                    f"[LOG_ID:{log_id}] FIRST TRANSFORMED ROW: {rows[0]!r}", **context
+                )
+                LOGGER.info(
+                    f"[LOG_ID:{log_id}] FIRST TRANSFORMED ROW version field: {rows[0].get('version')}",
+                    **context,
+                )
+            except Exception:
+                LOGGER.info(
+                    f"[LOG_ID:{log_id}] FIRST TRANSFORMED ROW: unavailable or empty",
+                    **context,
+                )
+
             with self._db.get_connection() as conn:
                 committed = load_step.run(
                     rows=rows,

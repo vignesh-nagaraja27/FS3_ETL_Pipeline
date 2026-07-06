@@ -1207,12 +1207,6 @@ elif page == "⚙️ Settings":
                             min_value=0,
                             key=f"p_vc_{i}",
                         )
-                        new_mcol = st.number_input(
-                            "Measure No. Column",
-                            value=parser.get("measure_no_col_idx", 0),
-                            min_value=0,
-                            key=f"p_mc_{i}",
-                        )
 
                     if st.button(f"💾 Save Rule {i + 1}", key=f"save_rule_{i}"):
                         parts_cfg["mappings"][i].update(
@@ -1228,7 +1222,6 @@ elif page == "⚙️ Settings":
                                     "header_row": int(new_hrow),
                                     "data_start_row": int(new_drow),
                                     "value_column_idx": int(new_vcol),
-                                    "measure_no_col_idx": int(new_mcol),
                                     "excel_sheet_index": parser.get(
                                         "excel_sheet_index", -1
                                     ),

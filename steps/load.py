@@ -48,15 +48,13 @@ produced by the Transform Step and persists them to the database in two stages:
 The UPSERT fix for that bug is preserved intact.
 """
 
-from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Tuple
+import zlib
 
 from utils.logger import LOGGER
 
 
 # ── Table constants ──────────────────────────────────────────────────────────
-TABLE_STAGING_HD = "fs3.pre_f_3d_hd"
-TABLE_STAGING_BL = "fs3.pre_f_3d_bl"
 TABLE_MASTER = "fs3.pre_m_cmm"
 TABLE_TRANSACTION = "fs3.pre_t_cmm"
 
@@ -74,12 +72,9 @@ class LoadStep:
     def __init__(self, pipeline_type: str):
         """
         Args:
-            pipeline_type (str): '3D_HD' or '3D_BL' — determines which staging table is used.
+            pipeline_type (str): '3D_HD' or '3D_BL'. Kept for compatibility.
         """
         self._pipeline_type = pipeline_type
-        self._staging_table = (
-            TABLE_STAGING_HD if pipeline_type == "3D_HD" else TABLE_STAGING_BL
-        )
 
     def run(
         self,
@@ -88,7 +83,7 @@ class LoadStep:
         machine_id: str,
         log_id: int,
         conn,  # ← SINGLE shared connection, owned by pipeline_3d.py
-        version: str = None,
+        version: Optional[str] = None,
     ) -> int:
         """
         Executes all staging, master, and transaction inserts within a SINGLE atomic
@@ -115,15 +110,19 @@ class LoadStep:
         Raises:
             Exception: Any DB error re-raised immediately to trigger rollback upstream.
         """
-        vehicle_model = part_config.get("vehicle_model")
-        parts_code = part_config.get("parts_code")
-        op_no = part_config.get("op_no")
-        vpo_code = part_config.get("vpo_code")
+        vehicle_model = part_config.get("vehicle_model") or ""
+        parts_code = part_config.get("parts_code") or ""
+        op_no = part_config.get("op_no") or ""
+        vpo_code = part_config.get("vpo_code") or ""
         context = dict(
-            machine=machine_id, model=vehicle_model, part=parts_code, op=op_no
+            machine=machine_id or "",
+            model=vehicle_model or "",
+            part=parts_code or "",
+            op=op_no or "",
         )
 
-        version = version or datetime.utcnow().strftime("%Y%m%d")
+        # Do NOT fabricate a version here. Keep `version` optional — resolve later per-row when possible.
+        # If the caller passed a file-level `version`, keep it; otherwise leave as None.
         committed = 0
 
         LOGGER.info(
@@ -136,31 +135,117 @@ class LoadStep:
         # All SQL executions below share this cursor and, therefore, the same
         # PostgreSQL transaction. The commit/rollback is triggered by the caller's
         # ConnectionContext.__exit__ — NOT here.
+        mc_no = machine_id or ""
         with conn.cursor() as cur:
             for i, row in enumerate(rows):
-                measure_no = row.get("measure_no")
+                measure_no = None
+                # Validate measurement value present
                 measure_value = row.get("measure_value")
+                if measure_value is None:
+                    raise ValueError(f"LOAD STEP: Row {i + 1} missing 'measure_value'.")
+
+                measurement_datetime = row.get("measurement_datetime")
+                if measurement_datetime is None:
+                    raise ValueError(
+                        f"LOAD STEP: Row {i + 1} missing 'measurement_datetime' derived from filename."
+                    )
 
                 try:
-                    # ── STAGE 1: Staging Table ────────────────────────────────
-                    self._insert_staging(cur, row, log_id, context)
+                    # Debug: log the full row and keys before resolving measure_no/version
+                    LOGGER.info(f"FIRST TRANSFORMED ROW: {row!r}", **context)
+                    LOGGER.info(f"ROW KEYS: {sorted(list(row.keys()))!r}", **context)
+                    LOGGER.info(
+                        f"BUSINESS KEYS: evaluation_item1={row.get('evaluation_item1')!r} "
+                        f"measure_item={row.get('measure_item')!r} "
+                        f"measure_position={row.get('measure_position')!r} "
+                        f"measure_no={row.get('measure_no')!r} "
+                        f"version={row.get('version')!r}",
+                        **context,
+                    )
+                    LOGGER.info(
+                        f"LOAD STEP: Row {i + 1} spec={row.get('specification')!r} "
+                        f"upper_limit={row.get('upper_limit')!r} "
+                        f"lower_limit={row.get('lower_limit')!r}",
+                        **context,
+                    )
 
-                    # ── STAGE 2: Master Table (pre_m_cmm) — RC/OP010 fix ─────
-                    self._upsert_master(
+                    # Resolve or validate measure_no and version per-row
+                    # Normalize specification and limits to strings to match DB varchar columns
+                    if row.get("specification") is not None:
+                        try:
+                            row["specification"] = str(row.get("specification")).strip()
+                        except Exception:
+                            row["specification"] = None
+                    if row.get("upper_limit") is not None:
+                        try:
+                            row["upper_limit"] = str(row.get("upper_limit"))
+                        except Exception:
+                            row["upper_limit"] = None
+                    if row.get("lower_limit") is not None:
+                        try:
+                            row["lower_limit"] = str(row.get("lower_limit"))
+                        except Exception:
+                            row["lower_limit"] = None
+
+                    file_level_version = version
+                    _v = row.get("version")
+                    provided_version = None
+                    if isinstance(_v, str):
+                        _vs = _v.strip()
+                        provided_version = _vs if _vs else None
+                    measure_no, resolved_version = self._resolve_or_generate_measure_no(
                         cur,
-                        version,
+                        row,
+                        provided_version or file_level_version,
                         vpo_code,
                         vehicle_model,
                         parts_code,
                         op_no,
-                        measure_no,
+                        mc_no,
                         log_id,
                         context,
                     )
+                    # Ensure measure_no is an int
+                    if measure_no is None:
+                        raise ValueError(
+                            f"LOAD STEP: Could not resolve 'measure_no' for row {i + 1}."
+                        )
+                    row["measure_no"] = int(measure_no)
+                    if resolved_version:
+                        row["version"] = resolved_version
 
-                    # ── STAGE 3: Transaction Table (pre_t_cmm) ────────────────
+                    # ── TRANSACTION TABLE ONLY: pre_t_cmm ─────────────────────
+                    version_value = row.get("version")
+                    if version_value is None:
+                        raise ValueError(
+                            f"LOAD STEP: Row {i + 1} missing resolved 'version' for pre_t_cmm."
+                        )
+
+                    serial_no_m_last4 = row.get("serial_no_m_last4")
+                    if serial_no_m_last4 is None:
+                        raise ValueError(
+                            f"LOAD STEP: Row {i + 1} missing 'serial_no_m_last4' required by pre_t_cmm."
+                        )
+
+                    vehicle_model_value = row.get("vehicle_model") or vehicle_model
+                    parts_code_value = row.get("parts_code") or parts_code
+                    op_no_value = row.get("op_no") or op_no
+
+                    measure_no_int = int(row["measure_no"])
                     self._insert_transaction(
-                        cur, vpo_code, measure_no, measure_value, log_id, context
+                        cur,
+                        version_value,
+                        vpo_code,
+                        vehicle_model_value,
+                        parts_code_value,
+                        op_no_value,
+                        mc_no,
+                        measurement_datetime,
+                        measure_no_int,
+                        str(serial_no_m_last4),
+                        float(measure_value),
+                        log_id,
+                        context,
                     )
 
                     committed += 1
@@ -192,29 +277,282 @@ class LoadStep:
     # Private SQL executors — all accept a cursor, none manage connections
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _insert_staging(self, cur, row: dict, log_id: int, context: dict):
+    def _resolve_or_generate_measure_no(
+        self,
+        cur,
+        row: dict,
+        version_value: Optional[str],
+        vpo_code: str,
+        vehicle_model: str,
+        parts_code: str,
+        op_no: str,
+        mc_no: str,
+        log_id: int,
+        context: dict,
+    ) -> Tuple[int, Optional[str]]:
         """
-        Inserts one measurement row into the staging table (pre_f_3d_hd or pre_f_3d_bl).
-        ON CONFLICT DO NOTHING ensures idempotency — safe to re-run without crashing.
+        Resolve an existing measure_no from pre_m_cmm or create a new master row.
+
+        If a matching master row exists, returns its measure_no and version.
+        If no matching master exists and a version is provided, generates the next
+        measure_no for that version, inserts a new pre_m_cmm row, and returns it.
+        If no master exists and version is missing, raises.
         """
-        sql = f"""
-            INSERT INTO {self._staging_table}
-                (vehicle_model, parts_code, op_no, measure_no, measure_value, imported_at)
-            VALUES (%s, %s, %s, %s, %s, NOW())
-            ON CONFLICT DO NOTHING;
-        """
-        cur.execute(
-            sql,
-            (
-                row["vehicle_model"],
-                row["parts_code"],
-                row["op_no"],
-                row["measure_no"],
-                row["measure_value"],
-            ),
+        evaluation_item1 = row.get("evaluation_item1")
+        measure_item = row.get("measure_item")
+        specification = row.get("specification")
+        upper_limit = row.get("upper_limit")
+        lower_limit = row.get("lower_limit")
+        measure_position = row.get("measure_position")
+
+        if not evaluation_item1 or not measure_item or not measure_position:
+            raise ValueError(
+                "LOAD STEP: Missing required business key(s) 'evaluation_item1', 'measure_item' or 'measure_position'."
+            )
+
+        LOGGER.info(
+            f"[LOG_ID:{log_id}] RESOLVE MEASURE_NO: "
+            f"version={version_value!r} evaluation_item1={evaluation_item1!r} "
+            f"measure_item={measure_item!r} measure_position={measure_position!r} "
+            f"specification={specification!r} upper_limit={upper_limit!r} "
+            f"lower_limit={lower_limit!r}",
+            **context,
         )
 
-    def _upsert_master(
+        if isinstance(version_value, str) and version_value.strip():
+            version_value = version_value.strip()
+            cur.execute(
+                f"""
+                SELECT measure_no
+                FROM {TABLE_MASTER}
+                WHERE version = %s
+                  AND vpo_code = %s
+                  AND vehicle_model = %s
+                  AND parts_code = %s
+                  AND op_no = %s
+                  AND evaluation_item1 = %s
+                  AND measure_item = %s
+                                    AND specification IS NOT DISTINCT FROM %s::text
+                                    AND upper_limit IS NOT DISTINCT FROM %s::text
+                                    AND lower_limit IS NOT DISTINCT FROM %s::text
+                LIMIT 1;
+                """,
+                (
+                    version_value,
+                    vpo_code,
+                    vehicle_model,
+                    parts_code,
+                    op_no,
+                    evaluation_item1,
+                    measure_item,
+                                        # ensure params are strings for varchar columns
+                                        (specification if specification is None else str(specification)),
+                                        (upper_limit if upper_limit is None else str(upper_limit)),
+                                        (lower_limit if lower_limit is None else str(lower_limit)),
+                ),
+            )
+            existing = cur.fetchone()
+            if existing and existing[0] is not None:
+                LOGGER.info(
+                    f"[LOG_ID:{log_id}] RESOLVE MEASURE_NO: Found exact matching master "
+                    f"measure_no={existing[0]!r} for version={version_value!r}.",
+                    **context,
+                )
+                return int(existing[0]), version_value
+
+            cur.execute(
+                f"""
+                SELECT measure_no, specification, upper_limit, lower_limit
+                FROM {TABLE_MASTER}
+                WHERE version = %s
+                  AND vpo_code = %s
+                  AND vehicle_model = %s
+                  AND parts_code = %s
+                  AND op_no = %s
+                  AND evaluation_item1 = %s
+                  AND measure_item = %s
+                  AND measure_position = %s
+                  AND (specification IS NULL OR upper_limit IS NULL OR lower_limit IS NULL)
+                ORDER BY measure_no
+                LIMIT 1;
+                """,
+                (
+                    version_value,
+                    vpo_code,
+                    vehicle_model,
+                    parts_code,
+                    op_no,
+                    evaluation_item1,
+                    measure_item,
+                    measure_position,
+                ),
+            )
+            candidate = cur.fetchone()
+            if candidate:
+                candidate_measure_no, existing_spec, existing_upper, existing_lower = (
+                    candidate
+                )
+                LOGGER.info(
+                    f"[LOG_ID:{log_id}] RESOLVE MEASURE_NO: Found existing master with NULL spec/limits "
+                    f"measure_no={candidate_measure_no} existing_spec={existing_spec!r} "
+                    f"existing_upper={existing_upper!r} existing_lower={existing_lower!r}",
+                    **context,
+                )
+                self._update_master_if_missing_fields(
+                    cur,
+                    version_value,
+                    vpo_code,
+                    vehicle_model,
+                    parts_code,
+                    op_no,
+                    candidate_measure_no,
+                    specification,
+                    upper_limit,
+                    lower_limit,
+                    log_id,
+                    context,
+                )
+                return int(candidate_measure_no), version_value
+
+            lock_key = self._advisory_lock_key(vehicle_model, parts_code, op_no)
+            cur.execute("SELECT pg_advisory_xact_lock(%s);", (lock_key,))
+
+            cur.execute(
+                f"""
+                SELECT MAX(measure_no)
+                FROM {TABLE_MASTER}
+                WHERE version = %s
+                  AND vpo_code = %s;
+                """,
+                (version_value, vpo_code),
+            )
+            row_val = cur.fetchone()
+            max_measure_no = (
+                int(row_val[0]) if row_val and row_val[0] is not None else 0
+            )
+            new_measure_no = max_measure_no + 1
+            self._insert_master(
+                cur,
+                version_value,
+                vpo_code,
+                vehicle_model,
+                parts_code,
+                op_no,
+                mc_no,
+                new_measure_no,
+                evaluation_item1,
+                measure_item,
+                measure_position,
+                specification,
+                upper_limit,
+                lower_limit,
+                log_id,
+                context,
+            )
+            return new_measure_no, version_value
+
+        cur.execute(
+            f"""
+            SELECT version, measure_no
+            FROM {TABLE_MASTER}
+            WHERE vpo_code = %s
+              AND vehicle_model = %s
+              AND parts_code = %s
+              AND op_no = %s
+              AND evaluation_item1 = %s
+              AND measure_item = %s
+              AND measure_position = %s
+            LIMIT 1;
+            """,
+            (
+                vpo_code,
+                vehicle_model,
+                parts_code,
+                op_no,
+                evaluation_item1,
+                measure_item,
+                measure_position,
+            ),
+        )
+        existing_any = cur.fetchone()
+        if existing_any and existing_any[0] is not None:
+            found_version, found_measure_no = existing_any[0], existing_any[1]
+            LOGGER.info(
+                f"[LOG_ID:{log_id}] RESOLVE MEASURE_NO: Reusing existing master "
+                f"version={found_version!r} measure_no={found_measure_no!r} "
+                f"for business key set with NULL-able specs.",
+                **context,
+            )
+            self._update_master_if_missing_fields(
+                cur,
+                found_version,
+                vpo_code,
+                vehicle_model,
+                parts_code,
+                op_no,
+                found_measure_no,
+                specification,
+                upper_limit,
+                lower_limit,
+                log_id,
+                context,
+            )
+            return int(found_measure_no), found_version
+
+        raise ValueError(
+            "LOAD STEP: Cannot create a new master record because version is missing. "
+            "Provide a version value in the transformed data."
+        )
+
+    def _insert_master(
+        self,
+        cur,
+        version: str,
+        vpo_code: str,
+        vehicle_model: str,
+        parts_code: str,
+        op_no: str,
+        mc_no: str,
+        measure_no: int,
+        evaluation_item1: str,
+        measure_item: str,
+        measure_position: str,
+        specification: Optional[str],
+        upper_limit: Optional[float],
+        lower_limit: Optional[float],
+        log_id: int,
+        context: dict,
+    ):
+        """
+        Inserts a new master definition row into pre_m_cmm.
+        """
+        sql = f"""
+            INSERT INTO {TABLE_MASTER}
+                (version, vpo_code, vehicle_model, parts_code, op_no, mc_no, measure_no, evaluation_item1, measure_item, measure_position, specification, upper_limit, lower_limit, insert_date, update_date)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+        """
+        params = (
+            version,
+            vpo_code,
+            vehicle_model,
+            parts_code,
+            op_no,
+            mc_no,
+            measure_no,
+            evaluation_item1,
+            measure_item,
+            measure_position,
+            (specification if specification is None else str(specification)),
+            (upper_limit if upper_limit is None else str(upper_limit)),
+            (lower_limit if lower_limit is None else str(lower_limit)),
+        )
+        LOGGER.info(
+            f"[LOG_ID:{log_id}] INSERT MASTER SQL: {sql.strip()} PARAMS={params}",
+            **context,
+        )
+        cur.execute(sql, params)
+
+    def _update_master_if_missing_fields(
         self,
         cur,
         version: str,
@@ -223,51 +561,73 @@ class LoadStep:
         parts_code: str,
         op_no: str,
         measure_no: int,
+        specification: Optional[str],
+        upper_limit: Optional[float],
+        lower_limit: Optional[float],
         log_id: int,
         context: dict,
     ):
         """
-        Inserts or updates the measurement DEFINITION row in pre_m_cmm.
-
-        This is the fix for the RC/OP010 bug:
-          - OLD BEHAVIOR: If the row didn't exist → SKIP silently.
-          - NEW BEHAVIOR: If the row doesn't exist → INSERT it. If it exists → UPDATE fields.
-
-        ON CONFLICT DO UPDATE makes this fully idempotent.
+        Updates an existing master row only when incoming spec/limit values are present
+        and the stored row has NULLs for those fields.
         """
-        # evaluation_item1 is NOT NULL in the schema. Use a structured placeholder
-        # if the conversion mapping table hasn't been imported yet for this measure.
-        evaluation_item1_placeholder = f"{op_no}-M{measure_no:04d}"
-
         sql = f"""
-            INSERT INTO {TABLE_MASTER}
-                (version, vpo_code, vehicle_model, parts_code, op_no, measure_no, evaluation_item1)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (version, vpo_code, measure_no, evaluation_item1)
-            DO UPDATE SET
-                vehicle_model = EXCLUDED.vehicle_model,
-                parts_code    = EXCLUDED.parts_code,
-                op_no         = EXCLUDED.op_no;
+            UPDATE {TABLE_MASTER}
+            SET specification = COALESCE(specification, %s),
+                upper_limit = COALESCE(upper_limit, %s),
+                lower_limit = COALESCE(lower_limit, %s),
+                update_date = CURRENT_TIMESTAMP
+            WHERE version = %s
+              AND vpo_code = %s
+              AND vehicle_model = %s
+              AND parts_code = %s
+              AND op_no = %s
+              AND measure_no = %s
+              AND (specification IS NULL OR upper_limit IS NULL OR lower_limit IS NULL);
         """
-        cur.execute(
-            sql,
-            (
-                version,
-                vpo_code,
-                vehicle_model,
-                parts_code,
-                op_no,
-                measure_no,
-                evaluation_item1_placeholder,
-            ),
+        params = (
+            (specification if specification is None else str(specification)),
+            (upper_limit if upper_limit is None else str(upper_limit)),
+            (lower_limit if lower_limit is None else str(lower_limit)),
+            version,
+            vpo_code,
+            vehicle_model,
+            parts_code,
+            op_no,
+            measure_no,
         )
+        LOGGER.info(
+            f"[LOG_ID:{log_id}] UPDATE MASTER SQL: {sql.strip()} PARAMS={params}",
+            **context,
+        )
+        cur.execute(sql, params)
+        LOGGER.info(
+            f"[LOG_ID:{log_id}] UPDATE MASTER: measure_no={measure_no!r} "
+            f"specification={specification!r} upper_limit={upper_limit!r} "
+            f"lower_limit={lower_limit!r}",
+            **context,
+        )
+
+    def _advisory_lock_key(
+        self, vehicle_model: str, parts_code: str, op_no: str
+    ) -> int:
+        """Deterministic 32-bit advisory lock key derived from business keys."""
+        key_source = f"{vehicle_model}|{parts_code}|{op_no}"
+        return int(zlib.adler32(key_source.encode("utf-8")))
 
     def _insert_transaction(
         self,
         cur,
+        version: Optional[str],
         vpo_code: str,
+        vehicle_model: str,
+        parts_code: str,
+        op_no: str,
+        mc_no: str,
+        measurement_datetime,
         measure_no: int,
-        measure_value: float,
+        serial_no_m_last4: str,
+        measure_value: Any,
         log_id: int,
         context: dict,
     ):
@@ -277,9 +637,25 @@ class LoadStep:
         """
         sql = f"""
             INSERT INTO {TABLE_TRANSACTION}
-                (vpo_code, datetime, measure_no, measure_value)
-            VALUES (%s, NOW(), %s, %s)
+                (version, vpo_code, vehicle_model, parts_code, op_no, mc_no, datetime, measure_no, serial_no_m_last4, value, insert_date, update_date)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             ON CONFLICT (vpo_code, datetime, measure_no)
             DO NOTHING;
         """
-        cur.execute(sql, (vpo_code, measure_no, measure_value))
+        params = (
+            version,
+            vpo_code,
+            vehicle_model,
+            parts_code,
+            op_no,
+            mc_no,
+            measurement_datetime,
+            measure_no,
+            serial_no_m_last4,
+            str(measure_value),
+        )
+        LOGGER.info(
+            f"[LOG_ID:{log_id}] INSERT TRANSACTION SQL: {sql.strip()} PARAMS={params}",
+            **context,
+        )
+        cur.execute(sql, params)
