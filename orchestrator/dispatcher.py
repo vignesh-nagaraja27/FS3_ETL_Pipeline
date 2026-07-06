@@ -10,14 +10,15 @@ The Dispatcher is the 'Classifier' of this system. Its job is narrow and critica
     3. Which pipeline should process it?
 
 The dispatcher never processes data itself — it only classifies and routes.
-All classification rules live in 'configs/parts_3d.json' and 'configs/parts_checksheet.json'.
-To support a new file type, you add a rule to the JSON, not here.
+3D file classification comes from the database (fs3.pre_m_file_pattern) via
+FilePatternRepository. Checksheet classification uses 'configs/parts_checksheet.json'.
 """
 
 from pathlib import Path
 from typing import Optional, Tuple
 
 from config_loader import ConfigLoader
+from repositories.file_pattern_repository import FilePatternRepository
 from utils.logger import LOGGER
 
 
@@ -32,6 +33,9 @@ class Dispatcher:
     """
     Classifies incoming files against the configured part/model mapping rules
     and returns the matched context required by the pipeline executor.
+
+    3D file classification uses FilePatternRepository (database-driven, startswith matching).
+    Checksheet classification uses ConfigLoader (JSON-driven, regex matching).
     """
 
     def __init__(self, config: ConfigLoader):
@@ -40,12 +44,13 @@ class Dispatcher:
             config (ConfigLoader): The shared config instance loaded at startup.
         """
         self._config = config
+        self._file_pattern_repo = FilePatternRepository()
 
     def classify(self, file_path: Path) -> Tuple[str, Optional[dict]]:
         """
         The main classification method. Given a file path, returns:
           - pipeline_type (str): e.g. '3D_HD', 'CHECKSHEET', or 'UNKNOWN'
-          - matched_config (dict or None): The full config block from the JSON mapping.
+          - matched_config (dict or None): The matched config block.
 
         Usage in job_runner:
             pipeline_type, part_config = dispatcher.classify(file_path)
@@ -62,12 +67,14 @@ class Dispatcher:
         """
         filename = file_path.name
 
-        # Try matching against 3D HD rules first
-        match_3d = self._config.match_3d_part(filename)
-        if match_3d:
-            pipeline_type = PIPELINE_3D_HD
+        # Try matching against 3D rules from database (fs3.pre_m_file_pattern)
+        match_3d = self._file_pattern_repo.find_match(filename)
+        if match_3d is not None:
+            pipeline_type = match_3d.get("machine_type", PIPELINE_3D_HD)
             LOGGER.info(
-                f"Classified as '{pipeline_type}': {filename}",
+                f"Classified '{filename}' "
+                f"using pattern '{match_3d.get('file_pattern')}' "
+                f"as '{pipeline_type}'",
                 model=match_3d.get("vehicle_model"),
                 part=match_3d.get("parts_code"),
                 op=match_3d.get("op_no"),
@@ -89,7 +96,7 @@ class Dispatcher:
         # No match found — quarantine the file and log clearly
         LOGGER.warning(
             f"[UNCLASSIFIED] No matching rule found for file '{filename}'. "
-            f"Check 'configs/parts_3d.json' and 'configs/parts_checksheet.json' "
-            f"to see if a new match_pattern needs to be added for this file type."
+            f"Check 'fs3.pre_m_file_pattern' for 3D rules or "
+            f"'configs/parts_checksheet.json' for checksheet rules."
         )
         return PIPELINE_UNKNOWN, None

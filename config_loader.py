@@ -88,6 +88,24 @@ class ConfigLoader:
         """Returns the routing folder paths (processing, completed, ng)."""
         return self.machines.get("processing_folders", {})
 
+    def get_destination_root(self) -> str:
+        """
+        Returns the root path under which the per-operation destination
+        structure is built.
+
+        Example return value: 'C:/FS3/DataCollect'
+
+        The pipeline uses this with utils.path_helper.get_working_paths()
+        to construct:
+            <destination_root>/<MC_NO>/<VEHICLE_MODEL>/<PARTS_CODE>/<OP_NO>/_processing
+            <destination_root>/<MC_NO>/<VEHICLE_MODEL>/<PARTS_CODE>/<OP_NO>/_completed
+            <destination_root>/<MC_NO>/<VEHICLE_MODEL>/<PARTS_CODE>/<OP_NO>/_NG
+        """
+        dest = self.machines.get("destination_root", {})
+        if isinstance(dest, dict):
+            return dest.get("path", "")
+        return str(dest or "")
+
     def get_db_config(self) -> dict:
         """Returns the database connection settings."""
         return self.db

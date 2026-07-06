@@ -15,7 +15,6 @@ Key behavior:
   - On any failure, the original source file is left untouched.
 """
 
-import os
 import shutil
 import time
 from pathlib import Path
@@ -30,21 +29,24 @@ TABLE_DLDATA = "fs3.pre_l_3d_dldate"
 
 class CopyStep:
     """
-    Moves a stable raw file to the processing staging area and registers it in the DB.
+    Copies a stable raw file into the per-operation _processing staging folder
+    and registers it in the DB.
+
+    The processing_path is built per-run by the pipeline using
+    utils.path_helper.get_working_paths() — no flat shared folder anymore.
     """
 
-    def __init__(self, processing_dir: str):
+    def __init__(self):
         """
-        Args:
-            processing_dir (str): The '_processing' folder path from machines.json.
+        CopyStep no longer owns a fixed processing directory.
+        The per-operation _processing path is passed directly to run().
         """
-        self._processing_dir = Path(processing_dir)
-        self._processing_dir.mkdir(parents=True, exist_ok=True)
         self._db = DatabaseHandler()
 
     def run(
         self,
         source_path: Path,
+        processing_path: Path,
         machine_id: str,
         vehicle_model: str,
         parts_code: str,
@@ -53,11 +55,14 @@ class CopyStep:
         stable_required_count: int = 3,
     ) -> Path:
         """
-        Waits for the file to stabilize, checks for duplicates, then moves it
-        to the processing folder.
+        Waits for the file to stabilize, checks for duplicates, then copies it
+        into the per-operation _processing folder.
 
         Args:
             source_path (Path): Full path to the raw file detected by the watcher.
+            processing_path (Path): The per-operation _processing folder
+                                    (e.g. C:/FS3/DataCollect/KTSF-0453/RC/HD-RH/OP010/_processing).
+                                    Created on demand if it doesn't exist.
             machine_id (str): Machine that produced this file.
             vehicle_model (str): Matched vehicle model code.
             parts_code (str): Matched parts code.
@@ -79,6 +84,9 @@ class CopyStep:
 
         LOGGER.info(f"COPY STEP started for '{source_path.name}'.", **context)
 
+        # Ensure the per-operation _processing folder exists
+        processing_path.mkdir(parents=True, exist_ok=True)
+
         # --- PHASE 1: Wait for file to become stable (not still being written) ---
         stable_dest = self._wait_for_stable(
             source_path, stable_wait_sec, stable_required_count, context
@@ -88,8 +96,8 @@ class CopyStep:
         # --- PHASE 2: Duplicate check via pre_l_3d_dldate ---
         self._check_duplicate(source_path.name, file_size, context)
 
-        # --- PHASE 3: Copy file to processing folder ---
-        dest_path = self._processing_dir / source_path.name
+        # --- PHASE 3: Copy file to per-operation _processing folder ---
+        dest_path = processing_path / source_path.name
         try:
             shutil.copy2(str(source_path), str(dest_path))
             LOGGER.info(

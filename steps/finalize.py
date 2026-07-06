@@ -18,6 +18,7 @@ import shutil
 from pathlib import Path
 
 from utils.logger import LOGGER
+from utils.path_helper import get_working_paths
 
 
 class FinalizeStep:
@@ -25,14 +26,24 @@ class FinalizeStep:
     Routes a processed file to its final folder based on success/failure outcome.
     """
 
-    def __init__(self, base_completed_dir: str, base_ng_dir: str):
+    def __init__(
+        self,
+        base_completed_dir: str = "",
+        base_ng_dir: str = "",
+        destination_root: str = "",
+    ):
         """
         Args:
-            base_completed_dir (str): Base path for completed files (e.g. C:/FS3/DataCollect/_completed)
-            base_ng_dir (str): Base path for failed files (e.g. C:/FS3/DataCollect/_NG)
+            base_completed_dir (str): Legacy base path for completed files.
+            base_ng_dir (str): Legacy base path for failed files.
+            destination_root (str): Root path used to build per-operation
+                                    _completed and _NG folders.
         """
-        self._base_completed_dir = Path(base_completed_dir)
-        self._base_ng_dir = Path(base_ng_dir)
+        self._base_completed_dir = (
+            Path(base_completed_dir) if base_completed_dir else None
+        )
+        self._base_ng_dir = Path(base_ng_dir) if base_ng_dir else None
+        self._destination_root = destination_root or ""
 
     def run_success(
         self,
@@ -52,11 +63,15 @@ class FinalizeStep:
         context = dict(
             machine=machine_id, model=vehicle_model, part=parts_code, op=op_no
         )
-        dest_dir = (
-            self._base_completed_dir / pipeline_type / vehicle_model / parts_code / "OK"
+        dest_dir = self._resolve_destination_dir(
+            success=True,
+            machine_id=machine_id,
+            vehicle_model=vehicle_model,
+            parts_code=parts_code,
+            op_no=op_no,
         )
         dest_dir.mkdir(parents=True, exist_ok=True)
-        dest_path = self._move(source_path, dest_dir, "OK", context, log_id)
+        dest_path = self._move(source_path, dest_dir, "completed", context, log_id)
 
         # Clean up the staged processing copy
         self._cleanup_staged(processing_path, context, log_id)
@@ -80,13 +95,42 @@ class FinalizeStep:
         context = dict(
             machine=machine_id, model=vehicle_model, part=parts_code, op=op_no
         )
-        dest_dir = self._base_ng_dir / pipeline_type / vehicle_model / parts_code / "NG"
+        dest_dir = self._resolve_destination_dir(
+            success=False,
+            machine_id=machine_id,
+            vehicle_model=vehicle_model,
+            parts_code=parts_code,
+            op_no=op_no,
+        )
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest_path = self._move(source_path, dest_dir, "NG", context, log_id)
 
         # Clean up the staged processing copy
         self._cleanup_staged(processing_path, context, log_id)
         return dest_path
+
+    def _resolve_destination_dir(
+        self,
+        success: bool,
+        machine_id: str,
+        vehicle_model: str,
+        parts_code: str,
+        op_no: str,
+    ) -> Path:
+        if self._destination_root:
+            _, completed_path, ng_path = get_working_paths(
+                destination_root=self._destination_root,
+                mc_no=machine_id,
+                vehicle_model=vehicle_model,
+                parts_code=parts_code,
+                op_no=op_no,
+                create=True,
+            )
+            return completed_path if success else ng_path
+
+        if success:
+            return self._base_completed_dir
+        return self._base_ng_dir
 
     def _move(
         self,

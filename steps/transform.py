@@ -3,15 +3,14 @@
 Transform Step
 --------------
 Reads the raw measurement file (CSV or Excel) from the processing folder,
-applies parsing logic based on the part config from parts_3d.json, and
+applies parsing logic using parser settings from machines.json, and classification metadata returned by Dispatcher.
 returns a clean list of row dictionaries ready for the database load step.
 
 This step does NOT write to the database. It only produces validated,
 cleaned data structures in memory. This separation keeps each step testable
 in isolation.
 
-Parser settings like 'header_row', 'data_start_row', 'value_column_idx',
-and 'excel_sheet_index' all come from the part config JSON — never hardcoded here.
+Parser settings like 'header_row', 'data_start_row',2'value_column_idx', and 'excel_sheet_index'3come from machine_config["parser"].
 """
 
 import math
@@ -28,20 +27,25 @@ from utils.logger import LOGGER
 class TransformStep:
     """
     Parses a raw measurement file into a list of clean row dictionaries.
-    Supports both CSV and Excel file formats as specified in the part config.
+    Supports both CSV and Excel file formats as specified in2machine_config["parser"].
     """
 
     # OPTIONAL_FIELD_ALIASES removed — rely on parser positional indexes or exact headers
 
     def run(
-        self, file_path: Path, part_config: dict, machine_id: str, log_id: int
+        self,
+        file_path: Path,
+        part_config: dict,
+        machine_config: dict,
+        machine_id: str,
+        log_id: int,
     ) -> List[Dict[str, Any]]:
         """
         Reads and transforms a file into a list of measurement row dicts.
 
         Args:
             file_path (Path): Path to the file in the processing folder.
-            part_config (dict): Matched part config block from parts_3d.json.
+            part_config (dict):2    Classification metadata returned by Dispatcher from fs3.pre_m_file_pattern.
             machine_id (str): Machine identifier for log context.
             log_id (int): The pipeline run log ID for correlation.
 
@@ -63,7 +67,7 @@ class TransformStep:
             op=op_no or "Unknown",
         )
 
-        parser = part_config.get("parser", {})
+        parser = machine_config.get("parser", {})
         file_type = parser.get("file_type", "csv").lower()
         header_row = parser.get("header_row", 0)
         data_start_row = parser.get("data_start_row", 1)
@@ -100,7 +104,7 @@ class TransformStep:
             raise ValueError(
                 f"[LOG_ID:{log_id}] TRANSFORM STEP: File '{file_path.name}' produced zero data rows. "
                 f"Verify that 'data_start_row' ({data_start_row}) and the file format are correct "
-                f"in 'configs/parts_3d.json'."
+                f"in machine_config['parser']."
             )
 
         rows = self._parse_rows(
@@ -354,7 +358,7 @@ class TransformStep:
             return df
         raise RuntimeError(
             f"[LOG_ID:{log_id}] TRANSFORM STEP: Unrecognized file_type '{file_type}' "
-            f"in part config. Supported values: 'csv', 'excel'."
+            f"in machine_config['parser']. Supported values: 'csv', 'excel'."
         )
 
     def _parse_rows(
@@ -385,11 +389,11 @@ class TransformStep:
 
         # Capture the header label for the measurement value column so we
         # can use it as a source for `measure_position` when the row cell is missing.
-        value_col_header = None
-        try:
-            value_col_header = df.columns[value_col_idx]
-        except Exception:
-            value_col_header = None
+        # value_col_header = None
+        # try:
+        #     value_col_header = df.columns[value_col_idx]
+        # except Exception:
+        #     value_col_header = None
 
         rows = []
         skipped = 0
@@ -434,35 +438,34 @@ class TransformStep:
 
                 evaluation_item1 = self._get_optional_string(row, "evaluation_item1")
                 measure_item = self._get_optional_string(row, "measure_item")
-                measure_position = self._get_optional_string(row, "measure_position")
-
+                # HD files do not contain measure_position.
+                # BL logic will be implemented later from filename.
+                measure_position = None
                 # If the source file does not contain the canonical headers for
                 # these business keys, attempt to derive them from the row by
                 # extracting values from the first non-numeric columns. This is
                 # an extraction from source data (not fabrication) to populate
                 # missing descriptive fields when header names differ.
-                if not evaluation_item1 or not measure_item or not measure_position:
+                if not evaluation_item1 or not measure_item:
                     derived = self._derive_business_keys_from_row(row)
                     if not evaluation_item1:
                         evaluation_item1 = derived.get("evaluation_item1")
                     if not measure_item:
                         measure_item = derived.get("measure_item")
-                    if not measure_position:
-                        measure_position = derived.get("measure_position")
 
                 # If measure_position is still missing, try to use the header
                 # label for the measurement value column (this is source data).
-                if not measure_position and value_col_header is not None:
-                    try:
-                        header_lbl = (
-                            value_col_header.strip()
-                            if isinstance(value_col_header, str)
-                            else str(value_col_header)
-                        )
-                        if header_lbl != "" and header_lbl.lower() != "nan":
-                            measure_position = header_lbl
-                    except Exception:
-                        pass
+                # if not measure_position and value_col_header is not None:
+                #     try:
+                #         header_lbl = (
+                #             value_col_header.strip()
+                #             if isinstance(value_col_header, str)
+                #             else str(value_col_header)
+                #         )
+                #         if header_lbl != "" and header_lbl.lower() != "nan":
+                #             measure_position = header_lbl
+                #     except Exception:
+                #         pass
 
                 # Prefer positional extraction when parser provides explicit indexes
                 if isinstance(spec_col_idx, int):

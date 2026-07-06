@@ -303,11 +303,11 @@ class LoadStep:
         specification = row.get("specification")
         upper_limit = row.get("upper_limit")
         lower_limit = row.get("lower_limit")
-        measure_position = row.get("measure_position")
+        measure_position: Optional[str] = row.get("measure_position")
 
-        if not evaluation_item1 or not measure_item or not measure_position:
+        if not evaluation_item1 or not measure_item:
             raise ValueError(
-                "LOAD STEP: Missing required business key(s) 'evaluation_item1', 'measure_item' or 'measure_position'."
+                "LOAD STEP: Missing required business key(s) 'evaluation_item1', 'measure_item'"
             )
 
         LOGGER.info(
@@ -371,7 +371,6 @@ class LoadStep:
                   AND op_no = %s
                   AND evaluation_item1 = %s
                   AND measure_item = %s
-                  AND measure_position = %s
                   AND (specification IS NULL OR upper_limit IS NULL OR lower_limit IS NULL)
                 ORDER BY measure_no
                 LIMIT 1;
@@ -384,7 +383,6 @@ class LoadStep:
                     op_no,
                     evaluation_item1,
                     measure_item,
-                    measure_position,
                 ),
             )
             candidate = cur.fetchone()
@@ -461,7 +459,6 @@ class LoadStep:
               AND op_no = %s
               AND evaluation_item1 = %s
               AND measure_item = %s
-              AND measure_position = %s
             LIMIT 1;
             """,
             (
@@ -471,7 +468,6 @@ class LoadStep:
                 op_no,
                 evaluation_item1,
                 measure_item,
-                measure_position,
             ),
         )
         existing_any = cur.fetchone()
@@ -516,7 +512,7 @@ class LoadStep:
         measure_no: int,
         evaluation_item1: str,
         measure_item: str,
-        measure_position: str,
+        measure_position: Optional[str],
         specification: Optional[str],
         upper_limit: Optional[float],
         lower_limit: Optional[float],

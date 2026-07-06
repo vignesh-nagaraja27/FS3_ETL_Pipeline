@@ -16,19 +16,17 @@
     {
       "machine_id": "KTSF-0453",
       "description": "Mitutoyo CMM -  Produces 3次元 HD　GT3とRC  measurement files.",
-      "source_path": "C:\\FS3\\CMM\\Mitutoyo\\KTS-0453\\Bigdata",
+      "source_path": "C:\\FS3\\CMM\\Mitutoyo\\KTSF-0453\\Bigdata",
+      "parser": {
+        "header_row": 10,
+        "data_start_row": 11,
+        "specification_column_idx": 4,
+        "upper_limit_column_idx": 5,
+        "lower_limit_column_idx": 6,
+        "value_column_idx": 7,
+        "excel_sheet_index": -1
+      },
       "pipeline_type": "3D_HD",
-      "poll_interval_sec": 5,
-      "stable_wait_sec": 2,
-      "stable_required_count": 3,
-      "max_workers": 2,
-      "enabled": true
-    },
-    {
-      "machine_id": "KTS-7106",
-      "description": "Mitutoyo CMM - Produces 3次元 BL　GT3,RC,E-NR  measurement files.",
-      "source_path": "C:/CMM/Mitutoyo/KTS-7106",
-      "pipeline_type": "3D_BL",
       "poll_interval_sec": 5,
       "stable_wait_sec": 2,
       "stable_required_count": 3,
@@ -42,8 +40,12 @@
     "poll_interval_sec": 10,
     "enabled": true
   },
+  "destination_root": {
+    "description": "Root folder for the per-operation destination structure. The pipeline builds <destination_root>/<MC_NO>/<VEHICLE_MODEL>/<PARTS_CODE>/<OP_NO>/{_processing, _completed, _NG} automatically for every incoming file.",
+    "path": "C:/FS3/DataCollect"
+  },
   "processing_folders": {
-    "description": "Staging folders used during pipeline execution. The system moves files through these instead of renaming them with symbols.",
+    "description": "Legacy flat staging folders. Kept for backward compatibility but no longer used by the pipeline — the per-operation structure under 'destination_root' replaces them.",
     "processing": "C:/FS3/DataCollect/_processing",
     "completed": "C:/FS3/DataCollect/_completed",
     "ng": "C:/FS3/DataCollect/_NG"
