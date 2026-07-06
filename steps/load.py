@@ -345,10 +345,10 @@ class LoadStep:
                     op_no,
                     evaluation_item1,
                     measure_item,
-                                        # ensure params are strings for varchar columns
-                                        (specification if specification is None else str(specification)),
-                                        (upper_limit if upper_limit is None else str(upper_limit)),
-                                        (lower_limit if lower_limit is None else str(lower_limit)),
+                    # ensure params are strings for varchar columns
+                    (specification if specification is None else str(specification)),
+                    (upper_limit if upper_limit is None else str(upper_limit)),
+                    (lower_limit if lower_limit is None else str(lower_limit)),
                 ),
             )
             existing = cur.fetchone()
