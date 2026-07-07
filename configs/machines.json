@@ -18,7 +18,7 @@
       "description": "Mitutoyo CMM -  Produces 3次元 HD　GT3とRC  measurement files.",
       "source_path": "C:\\FS3\\CMM\\Mitutoyo\\KTSF-0453\\Bigdata",
       "parser": {
-        "header_row": 10,
+        "header_row": null,
         "data_start_row": 11,
         "specification_column_idx": 4,
         "upper_limit_column_idx": 5,
@@ -28,11 +28,13 @@
         "layout_overrides": [
           {
             "file_pattern": "ﾁｬﾝﾊﾞｰ面高さ",
+            "header_row": null,
             "data_start_row": 10
           }
         ]
       },
       "pipeline_type": "3D_HD",
+      "version": "04530000",
       "poll_interval_sec": 5,
       "stable_wait_sec": 2,
       "stable_required_count": 3,

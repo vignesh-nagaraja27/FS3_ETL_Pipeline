@@ -75,6 +75,8 @@ class TransformStep:
         spec_col_idx = parser.get("specification_column_idx")
         upper_col_idx = parser.get("upper_limit_column_idx")
         lower_col_idx = parser.get("lower_limit_column_idx")
+        eval_col_idx = parser.get("evaluation_item1_column_idx", 1)
+        meas_col_idx = parser.get("measure_item_column_idx", 2)
         sheet_index = parser.get("excel_sheet_index", 0)
         # Apply layout overrides based on filename
         for override in parser.get("layout_overrides", []):
@@ -97,6 +99,14 @@ class TransformStep:
                 value_col_idx = override.get(
                     "value_column_idx",
                     value_col_idx,
+                )
+                eval_col_idx = override.get(
+                    "evaluation_item1_column_idx",
+                    eval_col_idx,
+                )
+                meas_col_idx = override.get(
+                    "measure_item_column_idx",
+                    meas_col_idx,
                 )
                 LOGGER.info(
                     f"[LOG_ID:{log_id}] LAYOUT OVERRIDE APPLIED "
@@ -153,20 +163,11 @@ class TransformStep:
             spec_col_idx,
             upper_col_idx,
             lower_col_idx,
+            eval_col_idx,
+            meas_col_idx,
             context,
             log_id,
         )
-
-        # If the transformed rows do not include a 'version', attempt to derive
-        # a file-level version from the filename. This uses an explicit timestamp
-        # embedded in the filename (YYYYMMDDhhmmss) when present. This is not a
-        # datetime-derived default — it's extraction from the file's metadata.
-        m = re.search(r"(\d{14})", file_path.name)
-        file_version = m.group(1) if m else None
-        if file_version:
-            for r in rows:
-                if not r.get("version"):
-                    r["version"] = file_version
 
         serial_no_m_last4 = self._derive_serial_no_m_last4_from_filename(file_path.name)
         if serial_no_m_last4:
@@ -408,6 +409,8 @@ class TransformStep:
         spec_col_idx: Optional[int],
         upper_col_idx: Optional[int],
         lower_col_idx: Optional[int],
+        eval_col_idx: int,
+        meas_col_idx: int,
         context: dict,
         log_id: int,
     ) -> List[Dict[str, Any]]:
@@ -472,25 +475,28 @@ class TransformStep:
                 if raw_value is None or (
                     isinstance(raw_value, float) and math.isnan(raw_value)
                 ):
+                    LOGGER.warning(
+                        f"[LOG_ID:{log_id}] SKIPPED BLANK ROW idx={idx}\n{row.to_string()}",
+                        **context,
+                    )
                     skipped += 1
                     continue
 
-                evaluation_item1 = self._get_optional_string(row, "evaluation_item1")
-                measure_item = self._get_optional_string(row, "measure_item")
+                # SIMPLIFIED: Extract positional data first (Column B=1, C=2)
+                evaluation_item1 = self._get_optional_string_by_pos(row, eval_col_idx)
+                measure_item = self._get_optional_string_by_pos(row, meas_col_idx)
+
+                # Fallback to header-based only if positional extraction returned nothing
+                if not evaluation_item1:
+                    evaluation_item1 = self._get_optional_string(
+                        row, "evaluation_item1"
+                    )
+                if not measure_item:
+                    measure_item = self._get_optional_string(row, "measure_item")
+
                 # HD files do not contain measure_position.
                 # BL logic will be implemented later from filename.
                 measure_position = None
-                # If the source file does not contain the canonical headers for
-                # these business keys, attempt to derive them from the row by
-                # extracting values from the first non-numeric columns. This is
-                # an extraction from source data (not fabrication) to populate
-                # missing descriptive fields when header names differ.
-                if not evaluation_item1 or not measure_item:
-                    derived = self._derive_business_keys_from_row(row)
-                    if not evaluation_item1:
-                        evaluation_item1 = derived.get("evaluation_item1")
-                    if not measure_item:
-                        measure_item = derived.get("measure_item")
 
                 # If measure_position is still missing, try to use the header
                 # label for the measurement value column (this is source data).
@@ -555,7 +561,6 @@ class TransformStep:
                         "specification": specification,
                         "upper_limit": upper_limit,
                         "lower_limit": lower_limit,
-                        "version": self._get_optional_string(row, "version"),
                         "measure_value": float(raw_value),
                     }
                 )
@@ -649,57 +654,6 @@ class TransformStep:
             return float(value)
         except (TypeError, ValueError):
             return None
-
-    def _derive_business_keys_from_row(
-        self, row: pd.Series
-    ) -> Dict[str, Optional[str]]:
-        """
-        Heuristic extraction of business keys from a raw row when canonical
-        header names are absent. Scans the row index (column names) for the
-        first non-numeric columns and uses their corresponding cell values.
-
-        Returns a dict with keys: evaluation_item1, measure_item, measure_position
-        where values are either a stripped string or None.
-        """
-
-        def is_numeric_label(lbl: str) -> bool:
-            try:
-                # treat labels that are purely numeric (or numeric-like) as numeric
-                float(lbl)
-                return True
-            except Exception:
-                return False
-
-        candidates = []
-        for col in row.index:
-            if not isinstance(col, str):
-                continue
-            label = col.strip()
-            if label == "" or is_numeric_label(label):
-                continue
-            candidates.append(col)
-            if len(candidates) >= 3:
-                break
-
-        def safe_get(col_index: int) -> Optional[str]:
-            if col_index < len(candidates):
-                try:
-                    v = row.get(candidates[col_index])
-                    if v is None or pd.isna(v):
-                        return None
-                    text = str(v).strip()
-                    if text == "" or text.lower() == "nan":
-                        return None
-                    return text
-                except Exception:
-                    return None
-            return None
-
-        return {
-            "evaluation_item1": safe_get(0),
-            "measure_item": safe_get(1),
-            "measure_position": safe_get(2),
-        }
 
     def _derive_specification_limits_from_row(
         self, row: pd.Series, value_col_idx: int

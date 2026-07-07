@@ -190,7 +190,9 @@ class Pipeline3D:
         try:
             self._status.set_processing(log_id, "LOAD", **context)
             load_step = LoadStep(pipeline_type=pipeline_type)
-
+            version = str(machine_config.get("version", "")).strip()
+            if not version:
+                raise ValueError(f"Version is not configured for machine {machine_id}")
             with self._db.get_connection() as conn:
                 committed = load_step.run(
                     rows=rows,
@@ -198,6 +200,7 @@ class Pipeline3D:
                     machine_id=machine_id,
                     log_id=log_id,
                     conn=conn,
+                    version=version,
                 )
 
             if committed == 0:
