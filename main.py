@@ -69,11 +69,13 @@ def main():
             db_config=db_config["db"],
             min_conn=pool_config.get("min_conn", 2),
             max_conn=pool_config.get("max_conn", 15),
+            debug_pool_stats=True,
         )
         LOGGER.info(
             f"Database connection pool initialized. "
             f"Min connections: {pool_config.get('min_conn', 2)}, "
             f"Max connections: {pool_config.get('max_conn', 15)}."
+            f"Debug Pool Stats: True"
         )
     except KeyError:
         LOGGER.critical(

@@ -199,6 +199,7 @@ class JobRunner:
                     if self._claim_dlq_entry(dlq_id):
                         with self._dlq_id_lock:
                             self._submitted_dlq_ids.add(dlq_id)
+                            LOGGER.info(f"SUBMITTING {file_path.name}")
 
                         self._executor.submit(
                             self._run_pipeline_retry_safe,

@@ -76,6 +76,45 @@ class TransformStep:
         upper_col_idx = parser.get("upper_limit_column_idx")
         lower_col_idx = parser.get("lower_limit_column_idx")
         sheet_index = parser.get("excel_sheet_index", 0)
+        # Apply layout overrides based on filename
+        for override in parser.get("layout_overrides", []):
+            pattern = override.get("file_pattern", "")
+            if pattern and pattern in file_path.name:
+                header_row = override.get("header_row", header_row)
+                data_start_row = override.get("data_start_row", data_start_row)
+                spec_col_idx = override.get(
+                    "specification_column_idx",
+                    spec_col_idx,
+                )
+                upper_col_idx = override.get(
+                    "upper_limit_column_idx",
+                    upper_col_idx,
+                )
+                lower_col_idx = override.get(
+                    "lower_limit_column_idx",
+                    lower_col_idx,
+                )
+                value_col_idx = override.get(
+                    "value_column_idx",
+                    value_col_idx,
+                )
+                LOGGER.info(
+                    f"[LOG_ID:{log_id}] LAYOUT OVERRIDE APPLIED "
+                    f"pattern='{pattern}' "
+                    f"header_row={header_row} "
+                    f"data_start_row={data_start_row}"
+                )
+                break
+        LOGGER.info(
+            f"[LOG_ID:{log_id}] TRANSFORM CONFIG: "
+            f"header_row={header_row}, "
+            f"data_start_row={data_start_row}, "
+            f"spec_col_idx={spec_col_idx}, "
+            f"upper_col_idx={upper_col_idx}, "
+            f"lower_col_idx={lower_col_idx}, "
+            f"value_col_idx={value_col_idx}",
+            **context,
+        )
 
         LOGGER.info(
             f"[LOG_ID:{log_id}] TRANSFORM STEP started. Reading '{file_path.name}' as '{file_type}'.",

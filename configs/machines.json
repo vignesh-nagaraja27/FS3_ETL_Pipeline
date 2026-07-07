@@ -24,7 +24,13 @@
         "upper_limit_column_idx": 5,
         "lower_limit_column_idx": 6,
         "value_column_idx": 7,
-        "excel_sheet_index": -1
+        "excel_sheet_index": -1,
+        "layout_overrides": [
+          {
+            "file_pattern": "ﾁｬﾝﾊﾞｰ面高さ",
+            "data_start_row": 10
+          }
+        ]
       },
       "pipeline_type": "3D_HD",
       "poll_interval_sec": 5,
