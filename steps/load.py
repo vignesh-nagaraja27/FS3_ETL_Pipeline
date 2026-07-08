@@ -302,7 +302,7 @@ class LoadStep:
 
         if existing:
             measure_no = int(existing[0])
-            self._update_master_limits(
+            latest_measurement_datetime = self._get_latest_measurement_datetime(
                 cur,
                 version_value,
                 vpo_code,
@@ -310,11 +310,40 @@ class LoadStep:
                 parts_code,
                 op_no,
                 measure_no,
-                upper_limit,
-                lower_limit,
-                log_id,
-                context,
             )
+            incoming_measurement_datetime = row["measurement_datetime"]
+            LOGGER.info(
+                f"[LOG_ID:{log_id}] DATETIME CHECK: "
+                f"incoming={incoming_measurement_datetime} "
+                f"existing={latest_measurement_datetime} "
+                f"measure_no={measure_no}",
+                **context,
+            )
+            if (
+                latest_measurement_datetime is None
+                or incoming_measurement_datetime > latest_measurement_datetime
+            ):
+                self._update_master_limits(
+                    cur,
+                    version_value,
+                    vpo_code,
+                    vehicle_model,
+                    parts_code,
+                    op_no,
+                    measure_no,
+                    upper_limit,
+                    lower_limit,
+                    log_id,
+                    context,
+                )
+            else:
+                LOGGER.info(
+                    f"[LOG_ID:{log_id}] SKIP MASTER LIMIT UPDATE: "
+                    f"incoming={incoming_measurement_datetime} "
+                    f"existing={latest_measurement_datetime} "
+                    f"measure_no={measure_no}",
+                    **context,
+                )
             return measure_no, version_value
 
         # ── 2. ACQUIRE LOCK ──
@@ -329,7 +358,7 @@ class LoadStep:
 
         if existing_post_lock:
             measure_no = int(existing_post_lock[0])
-            self._update_master_limits(
+            latest_measurement_datetime = self._get_latest_measurement_datetime(
                 cur,
                 version_value,
                 vpo_code,
@@ -337,11 +366,40 @@ class LoadStep:
                 parts_code,
                 op_no,
                 measure_no,
-                upper_limit,
-                lower_limit,
-                log_id,
-                context,
             )
+            incoming_measurement_datetime = row["measurement_datetime"]
+            LOGGER.info(
+                f"[LOG_ID:{log_id}] DATETIME CHECK: "
+                f"incoming={incoming_measurement_datetime} "
+                f"existing={latest_measurement_datetime} "
+                f"measure_no={measure_no}",
+                **context,
+            )
+            if (
+                latest_measurement_datetime is None
+                or incoming_measurement_datetime > latest_measurement_datetime
+            ):
+                self._update_master_limits(
+                    cur,
+                    version_value,
+                    vpo_code,
+                    vehicle_model,
+                    parts_code,
+                    op_no,
+                    measure_no,
+                    upper_limit,
+                    lower_limit,
+                    log_id,
+                    context,
+                )
+            else:
+                LOGGER.info(
+                    f"[LOG_ID:{log_id}] SKIP MASTER LIMIT UPDATE: "
+                    f"incoming={incoming_measurement_datetime} "
+                    f"existing={latest_measurement_datetime} "
+                    f"measure_no={measure_no}",
+                    **context,
+                )
             return measure_no, version_value
 
         # ── 4. GENERATE NEXT NO & INSERT ──
@@ -414,6 +472,40 @@ class LoadStep:
             f"[LOG_ID:{log_id}] UPDATE MASTER LIMITS: measure_no={measure_no} u={upper_limit}, l={lower_limit}",
             **context,
         )
+
+    def _get_latest_measurement_datetime(
+        self,
+        cur,
+        version: str,
+        vpo_code: str,
+        vehicle_model: str,
+        parts_code: str,
+        op_no: str,
+        measure_no: int,
+    ):
+        sql = f"""
+        SELECT MAX(datetime)
+        FROM {TABLE_TRANSACTION}
+        WHERE version = %s
+          AND vpo_code = %s
+          AND vehicle_model = %s
+          AND parts_code = %s
+          AND op_no = %s
+          AND measure_no = %s;
+    """
+        cur.execute(
+            sql,
+            (
+                version,
+                vpo_code,
+                vehicle_model,
+                parts_code,
+                op_no,
+                measure_no,
+            ),
+        )
+        result = cur.fetchone()
+        return result[0] if result else None
 
     def _insert_master(
         self,
