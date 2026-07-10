@@ -168,11 +168,12 @@ class Pipeline3D:
             )
             self._status.set_failed(
                 log_id,
-                exc=FileExistsError("TRANSFORM STEP failed: {e}"),
+                exc=e,
                 machine=machine_id,
                 model=vehicle_model,
                 part=parts_code,
                 op=op_no,
+                failed_step="TRANSFORM",
             )
             self._finalize_step.run_failure(
                 source_path,
@@ -212,11 +213,12 @@ class Pipeline3D:
             )
             self._status.set_failed(
                 log_id,
-                FileExistsError("LOAD STEP failed: {e}"),
+                e,
                 machine=machine_id,
                 model=vehicle_model,
                 part=parts_code,
                 op=op_no,
+                failed_step="LOAD",
             )
             self._finalize_step.run_failure(
                 source_path,
@@ -250,7 +252,7 @@ class Pipeline3D:
             )
             self._status.set_failed(
                 log_id,
-                exc=FileExistsError("FINALIZE STEP failed: {e}"),
+                exc=e,
                 machine=machine_id,
                 model=vehicle_model,
                 part=parts_code,

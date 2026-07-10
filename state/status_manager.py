@@ -25,6 +25,7 @@ class PipelineStatus(str, Enum):
     PROCESSING = "PROCESSING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+    DUPLICATE = "DUPLICATE"
 
 
 class DLQCategory(str, Enum):
@@ -203,7 +204,12 @@ class StatusManager:
         error_message = str(exc) if exc else "Unknown failure"
         traceback_str = tb_module.format_exc() if exc else None
 
-        self._update_log(log_id, PipelineStatus.FAILED, error_message=error_message)
+        status = PipelineStatus.FAILED
+
+        if "Duplicate file detected." in error_message:
+            status = PipelineStatus.DUPLICATE
+
+        self._update_log(log_id, status, error_message=error_message)
         self._write_audit(
             "ERROR",
             f"[LOG_ID:{log_id}] FAILED at {failed_step}: {error_message}",
@@ -216,7 +222,7 @@ class StatusManager:
             traceback_str,
         )
 
-        if file_path and file_name:
+        if status != PipelineStatus.DUPLICATE and file_path and file_name:
             self._push_to_dlq(
                 log_id,
                 file_name,
