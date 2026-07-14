@@ -195,7 +195,7 @@ class TransformStep:
             193E★R10_連続測定_9999999999999999_実証　5_20260630171111.CSV
             -> 実証5
         """
-        match = re.search(r"_([^_]+?)_(\d{14})(?:\.[^.]+)?$", file_name)
+        match = re.search(r"_([^_]+?)_(\d{14})(?:_[^.]+)?(?:\.[^.]+)?$", file_name)
         if not match:
             return None
 
@@ -216,7 +216,7 @@ class TransformStep:
             193E★R10_連続測定_9999999999999999_撮影_20260629205959.CSV
             -> 2026-06-29 20:59:59
         """
-        match = re.search(r"_(\d{14})(?:\.[^.]+)?$", file_name)
+        match = re.search(r"_(\d{14})(?:_[^.]+)?(?:\.[^.]+)?$", file_name)
         if not match:
             return None
 
@@ -575,7 +575,6 @@ class TransformStep:
                 if (
                     rows[-1]["evaluation_item1"] is None
                     or rows[-1]["measure_item"] is None
-                    or rows[-1]["measure_position"] is None
                 ):
                     LOGGER.info(
                         f"[LOG_ID:{log_id}] TRANSFORM STEP: Business-key-missing sample row idx={idx} values=\n{row.to_string()}",
