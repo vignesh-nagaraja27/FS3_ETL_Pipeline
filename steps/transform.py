@@ -188,18 +188,19 @@ class TransformStep:
         return rows
 
     def _derive_serial_no_m_last4_from_filename(self, file_name: str) -> Optional[str]:
-        """
-        Derive serial_no_m_last4 from the filename.
-
-        Example:
-            193E★R10_連続測定_9999999999999999_実証　5_20260630171111.CSV
-            -> 実証5
-        """
-        match = re.search(r"_([^_]+?)_(\d{14})(?:_[^.]+)?(?:\.[^.]+)?$", file_name)
-        if not match:
+        try:
+            parts = Path(file_name).stem.split("_")
+        except Exception:
+            return None
+        timestamp_idx = None
+        for i, part in enumerate(parts):
+            if re.fullmatch(r"\d{14}", part):
+                timestamp_idx = i
+                break
+        if timestamp_idx is None or timestamp_idx < 1:
             return None
 
-        serial_part = match.group(1).strip()
+        serial_part = parts[timestamp_idx - 1].strip()
         if not serial_part:
             return None
 
@@ -216,14 +217,14 @@ class TransformStep:
             193E★R10_連続測定_9999999999999999_撮影_20260629205959.CSV
             -> 2026-06-29 20:59:59
         """
-        match = re.search(r"_(\d{14})(?:_[^.]+)?(?:\.[^.]+)?$", file_name)
-        if not match:
-            return None
-
-        try:
-            return datetime.strptime(match.group(1), "%Y%m%d%H%M%S")
-        except ValueError:
-            return None
+        parts = Path(file_name).stem.split("_")
+        for part in parts:
+            if re.fullmatch(r"\d{14}", part):
+                try:
+                    return datetime.strptime(part, "%Y%m%d%H%M%S")
+                except ValueError:
+                    return None
+        return None
 
     def _read_file(
         self,

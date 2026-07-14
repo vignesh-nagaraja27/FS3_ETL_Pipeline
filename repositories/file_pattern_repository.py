@@ -49,4 +49,27 @@ class FilePatternRepository:
                     "vpo_code": row[6],
                 }
 
+        parts = filename.rsplit(".", 1)[0].split("_")
+
+        if len(parts) >= 3:
+            vehicle_model = parts[0].strip()
+            parts_code = parts[1].strip()
+            op_no = parts[2].strip()
+
+            if (
+                vehicle_model
+                and parts_code
+                and op_no
+                and op_no.upper().startswith("OP")
+            ):
+                return {
+                    "machine_type": "3D_HD",
+                    "file_pattern": None,
+                    "vehicle_model": vehicle_model,
+                    "parts_code": parts_code,
+                    "side": None,
+                    "op_no": op_no,
+                    "vpo_code": f"{vehicle_model}_{parts_code}_{op_no}",
+                }
+
         return None
