@@ -607,6 +607,287 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# EXPERIENCE LAYER — FS3 "Control Room 2026"
+# Visual-only overrides. The data model, queries, navigation state and actions
+# above remain unchanged; this layer modernises hierarchy, spacing and feedback.
+# ═══════════════════════════════════════════════════════════════════════════════
+st.markdown(
+    """
+<style>
+    :root {
+        --primary: #3157F6;
+        --primary-hover: #2447D8;
+        --secondary: #697386;
+        --bg-main: #F4F7FB;
+        --bg-surface: #FFFFFF;
+        --bg-zebra: #F8FAFD;
+        --border: #E4E9F2;
+        --text-hi: #101828;
+        --text-mid: #344054;
+        --text-low: #667085;
+        --ok: #12B76A;
+        --ok-bg: #ECFDF3;
+        --ok-bd: #ABEFC6;
+        --warn: #F79009;
+        --warn-bg: #FFFAEB;
+        --warn-bd: #FEDF89;
+        --crit: #F04438;
+        --crit-bg: #FEF3F2;
+        --crit-bd: #FECDCA;
+        --info: #2E90FA;
+        --info-bg: #EFF8FF;
+        --info-bd: #B2DDFF;
+        --radius: 14px;
+        --shadow-card: 0 1px 2px rgba(16,24,40,.04), 0 8px 24px rgba(16,24,40,.045);
+        --shadow-float: 0 16px 40px rgba(15,23,42,.16);
+    }
+
+    html, body, .stApp, [data-testid="stAppViewContainer"],
+    [data-testid="stMain"], [data-testid="stBottomBlockContainer"] {
+        background:
+            radial-gradient(circle at 80% -10%, rgba(49,87,246,.09), transparent 26rem),
+            linear-gradient(180deg, #F8FAFD 0%, var(--bg-main) 34rem) !important;
+    }
+    .block-container {
+        max-width: 1540px !important;
+        padding: 1.7rem 2.2rem 3rem !important;
+    }
+    [data-testid="stHeader"] { background: rgba(248,250,253,.82) !important; backdrop-filter: blur(16px); }
+    [data-testid="stDecoration"] { height: 0 !important; }
+
+    /* Navigation rail */
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #10182D 0%, #0B1220 100%) !important;
+        border-right: 0 !important;
+        box-shadow: 12px 0 40px rgba(15,23,42,.10) !important;
+    }
+    [data-testid="stSidebar"][aria-expanded="true"] { min-width: 278px !important; max-width: 278px !important; }
+    [data-testid="stSidebarContent"] {
+        background: transparent !important;
+        padding: 1.25rem .9rem !important;
+    }
+    .brand-block {
+        padding: 12px 12px 20px !important;
+        margin-bottom: 4px;
+        position: relative;
+    }
+    .brand-block::before {
+        content: "FS";
+        display: grid;
+        place-items: center;
+        width: 38px;
+        height: 38px;
+        margin-bottom: 13px;
+        border-radius: 11px;
+        background: linear-gradient(135deg, #6583FF, #3157F6 55%, #31C5F4);
+        color: #fff;
+        font: 800 12px var(--font-ui);
+        letter-spacing: -.2px;
+        box-shadow: 0 8px 24px rgba(49,87,246,.35);
+    }
+    .brand-title { font-size: 15px !important; letter-spacing: .2px !important; }
+    .brand-sub { color: #7F8BA3 !important; letter-spacing: 1.35px !important; margin-top: 6px !important; }
+    [data-testid="stSidebar"] hr { border-color: rgba(255,255,255,.08) !important; }
+    [data-testid="stSidebar"] div[data-testid="stButton"] { margin-bottom: 5px !important; }
+    [data-testid="stSidebar"] .stButton button,
+    [data-testid="stSidebar"] button[data-testid^="stBaseButton"] {
+        min-height: 43px !important;
+        padding: 9px 12px !important;
+        border-radius: 11px !important;
+        color: #AAB4C7 !important;
+        font-size: 12.5px !important;
+        transition: background .18s ease, color .18s ease, transform .18s ease !important;
+    }
+    [data-testid="stSidebar"] .stButton button:hover,
+    [data-testid="stSidebar"] button[data-testid^="stBaseButton"]:hover {
+        background: rgba(255,255,255,.065) !important;
+        border-color: transparent !important;
+        color: #FFFFFF !important;
+        transform: translateX(2px);
+    }
+    [data-testid="stSidebar"] .stButton button[kind="primary"],
+    [data-testid="stSidebar"] button[data-testid="stBaseButton-primary"] {
+        background: linear-gradient(90deg, rgba(49,87,246,.32), rgba(49,87,246,.14)) !important;
+        border: 1px solid rgba(101,131,255,.2) !important;
+        border-left: 1px solid rgba(101,131,255,.2) !important;
+        color: #FFFFFF !important;
+        box-shadow: inset 3px 0 0 #6583FF !important;
+    }
+    .status-card {
+        background: rgba(255,255,255,.045) !important;
+        border: 1px solid rgba(255,255,255,.085) !important;
+        border-radius: 12px !important;
+        padding: 13px !important;
+    }
+
+    /* Page identity and live status */
+    .global-status-bar {
+        position: relative;
+        background: rgba(255,255,255,.84) !important;
+        backdrop-filter: blur(18px);
+        border: 1px solid rgba(228,233,242,.9) !important;
+        border-left: 0 !important;
+        border-radius: 16px !important;
+        padding: 10px 14px !important;
+        margin-bottom: 1.35rem !important;
+        box-shadow: var(--shadow-card);
+    }
+    .global-status-bar::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 12px;
+        bottom: 12px;
+        width: 3px;
+        border-radius: 3px;
+        background: linear-gradient(180deg, #3157F6, #31C5F4);
+    }
+    .status-bar-group { gap: 8px !important; }
+    .status-bar-item {
+        padding: 3px 7px;
+        color: var(--text-low) !important;
+        font-size: 11px !important;
+    }
+    .status-bar-clock { color: #98A2B3 !important; letter-spacing: .2px; }
+    .status-pill { border-radius: 999px !important; padding: 3px 8px !important; letter-spacing: .25px; }
+    .pillar-title {
+        border: 0 !important;
+        padding: 3px 0 4px !important;
+        margin: 0 0 1.15rem !important;
+        font-size: clamp(22px, 2vw, 29px) !important;
+        font-weight: 750 !important;
+        color: var(--text-hi) !important;
+        letter-spacing: -.65px;
+    }
+
+    /* Surface system */
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+        background: rgba(255,255,255,.94) !important;
+        border: 1px solid rgba(228,233,242,.95) !important;
+        border-radius: 18px !important;
+        box-shadow: var(--shadow-card) !important;
+        margin-bottom: 1.2rem !important;
+        overflow: hidden;
+        transition: box-shadow .2s ease, transform .2s ease;
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"]:hover {
+        box-shadow: 0 2px 3px rgba(16,24,40,.04), 0 14px 34px rgba(16,24,40,.07) !important;
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"] > div { padding: 18px !important; }
+    .container-header {
+        background: transparent !important;
+        border-bottom: 1px solid #EEF1F6 !important;
+        padding: 1px 0 14px !important;
+        margin: 0 0 16px !important;
+        color: var(--text-hi) !important;
+        font-size: 12px !important;
+        font-weight: 750 !important;
+        letter-spacing: .7px;
+    }
+    .kpi-card {
+        min-height: 112px !important;
+        padding: 16px 16px 15px 18px !important;
+        border: 1px solid #E7EBF3 !important;
+        border-radius: 15px !important;
+        background: linear-gradient(145deg, #FFFFFF, #FAFBFE) !important;
+        box-shadow: 0 5px 15px rgba(16,24,40,.035) !important;
+        transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
+    }
+    .kpi-card:hover {
+        transform: translateY(-2px);
+        border-color: #D6DDF0 !important;
+        box-shadow: 0 12px 26px rgba(16,24,40,.07) !important;
+    }
+    .kpi-card::before { width: 4px; top: 16px; bottom: 16px; border-radius: 0 8px 8px 0; }
+    .kpi-card-neutral::before { background: linear-gradient(180deg, #3157F6, #31C5F4) !important; }
+    .kpi-label { font-size: 10px !important; letter-spacing: .75px !important; margin-bottom: 9px !important; }
+    .kpi-value {
+        font-size: clamp(19px, 1.65vw, 27px) !important;
+        letter-spacing: -1px;
+        color: var(--text-hi) !important;
+    }
+
+    /* Controls */
+    [data-testid="stTextInput"] input,
+    [data-testid="stNumberInput"] input,
+    [data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+    textarea {
+        min-height: 42px;
+        background: #FBFCFE !important;
+        border: 1px solid #DDE3ED !important;
+        border-radius: 11px !important;
+        padding: 8px 11px !important;
+        transition: border-color .15s ease, box-shadow .15s ease !important;
+    }
+    [data-testid="stTextInput"] input:focus,
+    [data-testid="stNumberInput"] input:focus,
+    textarea:focus {
+        border-color: #8097FA !important;
+        box-shadow: 0 0 0 4px rgba(49,87,246,.10) !important;
+    }
+    .stButton button, .stDownloadButton button, .stFormSubmitButton button {
+        min-height: 40px;
+        padding: 8px 14px !important;
+        border-radius: 10px !important;
+        border-color: #DDE3ED !important;
+        box-shadow: 0 1px 2px rgba(16,24,40,.04) !important;
+    }
+    .stButton button:hover, .stDownloadButton button:hover, .stFormSubmitButton button:hover {
+        background: #F5F7FF !important;
+        border-color: #A5B4FC !important;
+        transform: translateY(-1px);
+    }
+    .stButton button[kind="primary"] {
+        background: linear-gradient(135deg, #4868F7, #3157F6) !important;
+        border-color: #3157F6 !important;
+        box-shadow: 0 5px 14px rgba(49,87,246,.24) !important;
+    }
+    div[data-testid="stExpander"] {
+        border-radius: 13px !important;
+        border-color: #E4E9F2 !important;
+        overflow: hidden;
+    }
+    div[data-testid="stExpander"] summary {
+        background: #FBFCFE !important;
+        min-height: 48px;
+        padding: 10px 14px !important;
+        color: var(--text-hi) !important;
+    }
+    button[data-baseweb="tab"] { border-radius: 9px 9px 0 0 !important; padding: 10px 16px !important; }
+    button[data-baseweb="tab"][aria-selected="true"] { background: #F2F4FF !important; border-bottom-color: #3157F6 !important; }
+    [data-testid="stDataFrame"] {
+        border-color: #E4E9F2 !important;
+        border-radius: 13px !important;
+        overflow: hidden;
+    }
+    [data-testid="stAlert"] { border-radius: 12px !important; padding: 11px 14px !important; }
+    [data-testid="stMetric"] {
+        padding: 10px 12px;
+        background: #FAFBFD;
+        border: 1px solid #EEF1F5;
+        border-radius: 11px;
+    }
+
+    @media (max-width: 1100px) {
+        .block-container { padding: 1.25rem 1.2rem 2.5rem !important; }
+        .global-status-bar { align-items: flex-start; }
+        .status-bar-clock { width: 100%; padding-top: 6px; }
+        .kpi-card { min-height: 96px !important; }
+    }
+    @media (max-width: 700px) {
+        .block-container { padding: 1rem .75rem 2rem !important; }
+        .global-status-bar { border-radius: 13px !important; }
+        .status-bar-item { padding-left: 3px; }
+        .pillar-title { font-size: 22px !important; }
+        div[data-testid="stVerticalBlockBorderWrapper"] > div { padding: 13px !important; }
+        .container-header { margin-bottom: 12px !important; }
+    }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # DATABASE — Lightweight direct connection for the dashboard
@@ -1510,9 +1791,7 @@ elif page == "Settings":
         unsafe_allow_html=True,
     )
 
-    tab_machines, tab_parts, tab_db = st.tabs(
-        ["🖥️ Machines", "🔩 Parts (3D)", "🗄️ Database"]
-    )
+    tab_machines, tab_db = st.tabs(["🖥️ Machines", "🗄️ Database"])
 
     # ── MACHINES CONFIG ──────────────────────────────────────────────────────
     with tab_machines:
@@ -1595,8 +1874,8 @@ elif page == "Settings":
                 "machines.json not found. Ensure the ETL_Pipeline/configs/ folder exists."
             )
 
-    # ── PARTS 3D CONFIG ──────────────────────────────────────────────────────
-    with tab_parts:
+        # ── PARTS 3D CONFIG ──────────────────────────────────────────────────────
+        # with tab_parts:
         st.caption(
             "Edit part matching rules. Each rule maps a filename pattern to a vehicle model and parser settings. "
             "Changes take effect on next restart."
