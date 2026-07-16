@@ -697,7 +697,9 @@ def section_card(title: str, icon: str = ""):
     box = st.container(border=True)
     with box:
         label = f"{icon} {title}" if icon else title
-        st.markdown(f'<div class="container-header">{label}</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="container-header">{label}</div>', unsafe_allow_html=True
+        )
         yield box
 
 
@@ -771,7 +773,9 @@ def zebra(df: pd.DataFrame):
         return df
 
     def _stripe(row):
-        color = "background-color: #F8FAFC" if row.name % 2 else "background-color: #FFFFFF"
+        color = (
+            "background-color: #F8FAFC" if row.name % 2 else "background-color: #FFFFFF"
+        )
         return [color] * len(row)
 
     return df.style.apply(_stripe, axis=1)
@@ -791,7 +795,9 @@ with st.sidebar:
         """,
         unsafe_allow_html=True,
     )
-    st.markdown('<hr class="section-divider" style="margin:0 0 1rem;">', unsafe_allow_html=True)
+    st.markdown(
+        '<hr class="section-divider" style="margin:0 0 1rem;">', unsafe_allow_html=True
+    )
 
     NAV_ITEMS = [
         ("📊", "Overview"),
@@ -865,14 +871,22 @@ dlq_open_df = run_query(
 )
 dlq_open_count = 0 if dlq_open_df.empty else int(dlq_open_df.iloc[0]["cnt"])
 
-db_bar_pill = status_pill("CONNECTED", "ok") if is_db_up else status_pill("UNREACHABLE", "crit")
-watcher_bar_pill = status_pill("ACTIVE", "ok") if watcher_active else status_pill("NO HEARTBEAT", "warn")
+db_bar_pill = (
+    status_pill("CONNECTED", "ok") if is_db_up else status_pill("UNREACHABLE", "crit")
+)
+watcher_bar_pill = (
+    status_pill("ACTIVE", "ok")
+    if watcher_active
+    else status_pill("NO HEARTBEAT", "warn")
+)
 dlq_bar_pill = (
     status_pill(f"{dlq_open_count} AWAITING REVIEW", "crit")
     if dlq_open_count > 0
     else status_pill("CLEAR", "ok")
 )
-autorefresh_bar_pill = status_pill("ON · 30s", "info") if auto_refresh else status_pill("OFF", "off")
+autorefresh_bar_pill = (
+    status_pill("ON · 30s", "info") if auto_refresh else status_pill("OFF", "off")
+)
 
 st.markdown(
     f"""
@@ -899,7 +913,10 @@ if auto_refresh:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if page == "Overview":
-    st.markdown('<div class="pillar-title">📊 Overview — Real-Time Metrics</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="pillar-title">📊 Overview — Real-Time Metrics</div>',
+        unsafe_allow_html=True,
+    )
 
     # ── KPIs ──────────────────────────────────────────────────────────────────
     kpi_df = run_query("SELECT * FROM fs3.v_etl_today_kpis LIMIT 1;")
@@ -915,14 +932,22 @@ if page == "Overview":
     with section_card("Today's KPIs", "📊"):
         c1, c2, c3, c4, c5 = st.columns(5)
         with c1:
-            kpi_card("Total Processed Today", kpi_row.get("total_processed_today", "—"), status="neutral")
+            kpi_card(
+                "Total Processed Today",
+                kpi_row.get("total_processed_today", "—"),
+                status="neutral",
+            )
         with c2:
             ng = kpi_row.get("total_failed_today", "—")
             ng_status = "error" if isinstance(ng, (int, float)) and ng > 0 else "ok"
             kpi_card("NG Count Today", ng, status=ng_status)
         with c3:
             avg_sec = kpi_row.get("avg_processing_sec")
-            kpi_card("Avg Processing Time", f"{avg_sec:.1f}s" if avg_sec else "—", status="neutral")
+            kpi_card(
+                "Avg Processing Time",
+                f"{avg_sec:.1f}s" if avg_sec else "—",
+                status="neutral",
+            )
         with c4:
             kpi_card("Queue Depth", kpi_row.get("queue_depth", "—"), status="neutral")
         with c5:
@@ -932,7 +957,9 @@ if page == "Overview":
                 "DLQ Depth",
                 dlq,
                 status=dlq_status,
-                delta="Needs review" if (isinstance(dlq, (int, float)) and dlq > 0) else None,
+                delta="Needs review"
+                if (isinstance(dlq, (int, float)) and dlq > 0)
+                else None,
                 delta_good=False,
             )
 
@@ -940,32 +967,56 @@ if page == "Overview":
     with section_card("System Health", "🔦"):
         h1, h2, h3, h4 = st.columns(4)
         with h1:
-            kpi_card("Database", "CONNECTED" if is_db_up else "UNREACHABLE", status="ok" if is_db_up else "error")
+            kpi_card(
+                "Database",
+                "CONNECTED" if is_db_up else "UNREACHABLE",
+                status="ok" if is_db_up else "error",
+            )
         with h2:
-            kpi_card("Folder Watcher", "ACTIVE" if watcher_active else "UNKNOWN", status="ok" if watcher_active else "warn")
+            kpi_card(
+                "Folder Watcher",
+                "ACTIVE" if watcher_active else "UNKNOWN",
+                status="ok" if watcher_active else "warn",
+            )
         with h3:
             dlq_depth = kpi_row.get("dlq_depth", 0) or 0
-            kpi_card("DLQ Status", "HAS FAILURES" if dlq_depth > 0 else "CLEAR", status="error" if dlq_depth > 0 else "ok")
+            kpi_card(
+                "DLQ Status",
+                "HAS FAILURES" if dlq_depth > 0 else "CLEAR",
+                status="error" if dlq_depth > 0 else "ok",
+            )
         with h4:
             recent_critical = run_query(
                 "SELECT COUNT(*) AS cnt FROM fs3.etl_audit_log "
                 "WHERE level = 'CRITICAL' AND logged_at >= NOW() - INTERVAL '1 hour';"
             )
-            crit_count = 0 if recent_critical.empty else int(recent_critical.iloc[0]["cnt"])
-            kpi_card("Critical Alerts (1h)", crit_count, status="error" if crit_count > 0 else "ok")
+            crit_count = (
+                0 if recent_critical.empty else int(recent_critical.iloc[0]["cnt"])
+            )
+            kpi_card(
+                "Critical Alerts (1h)",
+                crit_count,
+                status="error" if crit_count > 0 else "ok",
+            )
 
     # ── 12-Hour Throughput Chart ───────────────────────────────────────────────
     with section_card("12-Hour Shift Throughput", "📈"):
-        throughput_df = run_query("SELECT * FROM fs3.v_etl_hourly_throughput ORDER BY hour_bucket;")
+        throughput_df = run_query(
+            "SELECT * FROM fs3.v_etl_hourly_throughput ORDER BY hour_bucket;"
+        )
 
         if not throughput_df.empty:
-            throughput_df["hour_bucket"] = pd.to_datetime(throughput_df["hour_bucket"]).dt.strftime("%H:%M")
+            throughput_df["hour_bucket"] = pd.to_datetime(
+                throughput_df["hour_bucket"]
+            ).dt.strftime("%H:%M")
             throughput_df = throughput_df.set_index("hour_bucket")
             throughput_df.columns = ["✅ Completed", "❌ Failed"]
 
             st.bar_chart(throughput_df, color=["#002D62", "#EF4444"], height=280)
         else:
-            st.info("No throughput data yet for the last 12 hours. The chart will populate once files are processed.")
+            st.info(
+                "No throughput data yet for the last 12 hours. The chart will populate once files are processed."
+            )
 
     # ── Recent Activity Feed ───────────────────────────────────────────────────
     with section_card("Recent Activity — Last 20 Events", "🕒"):
@@ -984,7 +1035,9 @@ if page == "Overview":
         if not recent_df.empty:
             st.dataframe(zebra(recent_df), width="stretch", hide_index=True)
         else:
-            st.info("No recent events. The audit log will populate once the pipeline starts processing files.")
+            st.info(
+                "No recent events. The audit log will populate once the pipeline starts processing files."
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -992,12 +1045,16 @@ if page == "Overview":
 # ═══════════════════════════════════════════════════════════════════════════════
 
 elif page == "Machine Registry":
-    st.markdown('<div class="pillar-title">🖥️ Machine Registry</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="pillar-title">🖥️ Machine Registry</div>', unsafe_allow_html=True
+    )
 
     with section_card("CMM / SPO Machine Directory", "🖥️"):
         search = st.text_input("🔍 Search by Machine ID", placeholder="e.g. KTSF-0453")
 
-        machines_df = run_query("SELECT * FROM fs3.v_machine_health ORDER BY machine_id;")
+        machines_df = run_query(
+            "SELECT * FROM fs3.v_machine_health ORDER BY machine_id;"
+        )
 
         if machines_df.empty:
             st.info(
@@ -1021,7 +1078,9 @@ elif page == "Machine Registry":
                         unsafe_allow_html=True,
                     )
                     c2.metric("Pipeline Type", row.get("pipeline_type", "—"))
-                    c3.metric("Total Processed", int(row.get("total_processed", 0) or 0))
+                    c3.metric(
+                        "Total Processed", int(row.get("total_processed", 0) or 0)
+                    )
                     c4.metric("Total Failed", int(row.get("total_failed", 0) or 0))
 
                     st.caption(f"📁 Source Path: `{row.get('source_path', '—')}`")
@@ -1031,7 +1090,9 @@ elif page == "Machine Registry":
                     )
 
                     if row.get("schema_drift_flag"):
-                        st.error("⚠️ Schema Drift Detected — review the audit log for this machine for SCHEMA_DRIFT errors.")
+                        st.error(
+                            "⚠️ Schema Drift Detected — review the audit log for this machine for SCHEMA_DRIFT errors."
+                        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1039,7 +1100,9 @@ elif page == "Machine Registry":
 # ═══════════════════════════════════════════════════════════════════════════════
 
 elif page == "Live File Queue":
-    st.markdown('<div class="pillar-title">📂 Live File Queue</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="pillar-title">📂 Live File Queue</div>', unsafe_allow_html=True
+    )
 
     with section_card("Queue Filters", "🔍"):
         col_f1, col_f2, col_f3 = st.columns([2, 2, 3])
@@ -1050,7 +1113,9 @@ elif page == "Live File Queue":
                 index=0,
             )
         with col_f2:
-            model_filter = st.text_input("Filter by Vehicle Model", placeholder="RC, NX, ...")
+            model_filter = st.text_input(
+                "Filter by Vehicle Model", placeholder="RC, NX, ..."
+            )
         with col_f3:
             hours_back = st.slider("Show files from last N hours", 1, 48, 12)
 
@@ -1082,7 +1147,9 @@ elif page == "Live File Queue":
         LIMIT 200;
     """)
 
-    with section_card("State Machine — PENDING → PROCESSING → COMPLETED (or FAILED)", "🔄"):
+    with section_card(
+        "State Machine — PENDING → PROCESSING → COMPLETED (or FAILED)", "🔄"
+    ):
         p1, p2, p3, p4 = st.columns(4)
         for col, s, stat in [
             (p1, "PENDING", "neutral"),
@@ -1097,14 +1164,22 @@ elif page == "Live File Queue":
             )
             cnt = 0 if count_df.empty else int(count_df.iloc[0]["cnt"])
             with col:
-                kpi_card(s, cnt, status=stat if not (s == "FAILED" and cnt == 0) else "neutral")
+                kpi_card(
+                    s,
+                    cnt,
+                    status=stat if not (s == "FAILED" and cnt == 0) else "neutral",
+                )
 
     with section_card(f"File Queue — Last {hours_back}h", "📂"):
         if queue_df.empty:
-            st.info(f"No files found for the selected filters in the last {hours_back} hours.")
+            st.info(
+                f"No files found for the selected filters in the last {hours_back} hours."
+            )
         else:
             st.dataframe(zebra(queue_df), width="stretch", hide_index=True, height=500)
-            st.caption(f"Showing {len(queue_df)} file(s). Use filters above to narrow down.")
+            st.caption(
+                f"Showing {len(queue_df)} file(s). Use filters above to narrow down."
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1112,14 +1187,25 @@ elif page == "Live File Queue":
 # ═══════════════════════════════════════════════════════════════════════════════
 
 elif page == "Dead Letter Queue":
-    st.markdown('<div class="pillar-title">💀 Dead Letter Queue (DLQ)</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="pillar-title">💀 Dead Letter Queue (DLQ)</div>',
+        unsafe_allow_html=True,
+    )
 
     with section_card("DLQ Filters", "🔍"):
         col_cat, col_mc = st.columns(2)
         with col_cat:
             cat_filter = st.selectbox(
                 "Filter by Error Category",
-                ["ALL", "SCHEMA_DRIFT", "DB_TIMEOUT", "VALIDATION_FAILED", "FILE_NOT_FOUND", "PARSE_ERROR", "UNKNOWN"],
+                [
+                    "ALL",
+                    "SCHEMA_DRIFT",
+                    "DB_TIMEOUT",
+                    "VALIDATION_FAILED",
+                    "FILE_NOT_FOUND",
+                    "PARSE_ERROR",
+                    "UNKNOWN",
+                ],
             )
         with col_mc:
             mc_filter = st.text_input("Filter by Machine ID", placeholder="KTSF-0453")
@@ -1153,7 +1239,9 @@ elif page == "Dead Letter Queue":
 
     with section_card("Failed Files Awaiting Review", "💀"):
         if dlq_df.empty:
-            st.success("✅ Dead Letter Queue is clear — no failed files awaiting review.")
+            st.success(
+                "✅ Dead Letter Queue is clear — no failed files awaiting review."
+            )
         else:
             st.warning(f"⚠️ {len(dlq_df)} file(s) are in the Dead Letter Queue.")
 
@@ -1169,7 +1257,9 @@ elif page == "Dead Letter Queue":
                     with c1:
                         st.markdown(f"**Machine:** `{row.get('machine_id', '—')}`")
                         st.markdown(f"**Queued At:** `{row.get('queued_at', '—')}`")
-                        st.caption(f"Error: {row.get('error_preview', 'No error message available.')}")
+                        st.caption(
+                            f"Error: {row.get('error_preview', 'No error message available.')}"
+                        )
 
                     with c2:
                         if st.button("🔁 Retry", key=f"retry_{row['id']}"):
@@ -1235,7 +1325,9 @@ elif page == "Dead Letter Queue":
                                     dest_path.parent.mkdir(parents=True, exist_ok=True)
                                     shutil.move(str(ng_path), str(dest_path))
                                     file_move_ok = True
-                                    st.info(f"📁 File moved: `{ng_path.name}` → `{source_path_dir}`")
+                                    st.info(
+                                        f"📁 File moved: `{ng_path.name}` → `{source_path_dir}`"
+                                    )
                                 except Exception as move_err:
                                     st.error(
                                         f"❌ File move failed: {move_err}\n\n"
@@ -1307,12 +1399,15 @@ elif page == "Dead Letter Queue":
 
                     with c3:
                         if st.button("📋 Reason", key=f"reason_{row['id']}"):
-                            st.session_state[f"show_tb_{row['id']}"] = not st.session_state.get(
-                                f"show_tb_{row['id']}", False
-                            )
+                            st.session_state[
+                                f"show_tb_{row['id']}"
+                            ] = not st.session_state.get(f"show_tb_{row['id']}", False)
 
                     if st.session_state.get(f"show_tb_{row['id']}", False):
-                        tb = row.get("traceback") or "No traceback was captured for this failure."
+                        tb = (
+                            row.get("traceback")
+                            or "No traceback was captured for this failure."
+                        )
                         st.code(tb, language="python")
 
 
@@ -1380,12 +1475,18 @@ elif page == "Audit Logs":
                 height=600,
                 column_config={
                     "level": st.column_config.TextColumn("Level", width="small"),
-                    "machine_id": st.column_config.TextColumn("Machine", width="medium"),
-                    "vehicle_model": st.column_config.TextColumn("Model", width="small"),
+                    "machine_id": st.column_config.TextColumn(
+                        "Machine", width="medium"
+                    ),
+                    "vehicle_model": st.column_config.TextColumn(
+                        "Model", width="small"
+                    ),
                     "op_no": st.column_config.TextColumn("Op", width="small"),
                     "current_step": st.column_config.TextColumn("Step", width="medium"),
                     "message": st.column_config.TextColumn("Message", width="large"),
-                    "pipeline_log_id": st.column_config.NumberColumn("Log ID", width="small"),
+                    "pipeline_log_id": st.column_config.NumberColumn(
+                        "Log ID", width="small"
+                    ),
                 },
             )
 
@@ -1404,27 +1505,48 @@ elif page == "Audit Logs":
 # ═══════════════════════════════════════════════════════════════════════════════
 
 elif page == "Settings":
-    st.markdown('<div class="pillar-title">⚙️ Settings — System Configuration</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="pillar-title">⚙️ Settings — System Configuration</div>',
+        unsafe_allow_html=True,
+    )
 
-    tab_machines, tab_parts, tab_db = st.tabs(["🖥️ Machines", "🔩 Parts (3D)", "🗄️ Database"])
+    tab_machines, tab_parts, tab_db = st.tabs(
+        ["🖥️ Machines", "🔩 Parts (3D)", "🗄️ Database"]
+    )
 
     # ── MACHINES CONFIG ──────────────────────────────────────────────────────
     with tab_machines:
-        st.caption("Edit machine watch directories. Changes take effect on next restart.")
+        st.caption(
+            "Edit machine watch directories. Changes take effect on next restart."
+        )
 
         if MACHINES_CFG_PATH.exists():
             with open(MACHINES_CFG_PATH, encoding="utf-8") as f:
                 machines_cfg = json.load(f)
 
             for i, machine in enumerate(machines_cfg.get("watch_directories", [])):
-                with st.expander(f"Machine: {machine.get('machine_id', f'Machine {i + 1}')}"):
+                with st.expander(
+                    f"Machine: {machine.get('machine_id', f'Machine {i + 1}')}"
+                ):
                     col_a, col_b = st.columns(2)
                     with col_a:
-                        new_id = st.text_input("Machine ID", machine.get("machine_id", ""), key=f"mc_id_{i}")
-                        new_path = st.text_input("Source Path", machine.get("source_path", ""), key=f"mc_path_{i}")
+                        new_id = st.text_input(
+                            "Machine ID",
+                            machine.get("machine_id", ""),
+                            key=f"mc_id_{i}",
+                        )
+                        new_path = st.text_input(
+                            "Source Path",
+                            machine.get("source_path", ""),
+                            key=f"mc_path_{i}",
+                        )
                         _ptype_options = ["3D_HD", "3D_BL", "CHECKSHEET"]
-                        _ptype_raw = str(machine.get("pipeline_type", "3D_HD") or "3D_HD")
-                        _ptype_default = _ptype_raw if _ptype_raw in _ptype_options else "3D_HD"
+                        _ptype_raw = str(
+                            machine.get("pipeline_type", "3D_HD") or "3D_HD"
+                        )
+                        _ptype_default = (
+                            _ptype_raw if _ptype_raw in _ptype_options else "3D_HD"
+                        )
                         new_type = st.selectbox(
                             "Pipeline Type",
                             _ptype_options,
@@ -1446,7 +1568,11 @@ elif page == "Settings":
                             max_value=20,
                             key=f"mc_workers_{i}",
                         )
-                        new_enabled = st.toggle("Enabled", value=machine.get("enabled", True), key=f"mc_enabled_{i}")
+                        new_enabled = st.toggle(
+                            "Enabled",
+                            value=machine.get("enabled", True),
+                            key=f"mc_enabled_{i}",
+                        )
 
                     if st.button(f"💾 Save Machine {new_id}", key=f"save_mc_{i}"):
                         machines_cfg["watch_directories"][i].update(
@@ -1461,9 +1587,13 @@ elif page == "Settings":
                         )
                         with open(MACHINES_CFG_PATH, "w", encoding="utf-8") as f:
                             json.dump(machines_cfg, f, indent=2, ensure_ascii=False)
-                        st.success(f"✅ Machine '{new_id}' saved. Restart the ETL daemon for changes to take effect.")
+                        st.success(
+                            f"✅ Machine '{new_id}' saved. Restart the ETL daemon for changes to take effect."
+                        )
         else:
-            st.error("machines.json not found. Ensure the ETL_Pipeline/configs/ folder exists.")
+            st.error(
+                "machines.json not found. Ensure the ETL_Pipeline/configs/ folder exists."
+            )
 
     # ── PARTS 3D CONFIG ──────────────────────────────────────────────────────
     with tab_parts:
@@ -1484,32 +1614,69 @@ elif page == "Settings":
                 ):
                     c1, c2, c3 = st.columns(3)
                     with c1:
-                        new_pattern = st.text_input("Match Pattern (regex)", rule.get("match_pattern", ""), key=f"p_pat_{i}")
-                        new_model = st.text_input("Vehicle Model", rule.get("vehicle_model", ""), key=f"p_model_{i}")
-                        new_part = st.text_input("Parts Code", rule.get("parts_code", ""), key=f"p_part_{i}")
+                        new_pattern = st.text_input(
+                            "Match Pattern (regex)",
+                            rule.get("match_pattern", ""),
+                            key=f"p_pat_{i}",
+                        )
+                        new_model = st.text_input(
+                            "Vehicle Model",
+                            rule.get("vehicle_model", ""),
+                            key=f"p_model_{i}",
+                        )
+                        new_part = st.text_input(
+                            "Parts Code", rule.get("parts_code", ""), key=f"p_part_{i}"
+                        )
                     with c2:
-                        new_op = st.text_input("Operation No.", rule.get("op_no", ""), key=f"p_op_{i}")
-                        new_vpo = st.text_input("VPO Code", rule.get("vpo_code", ""), key=f"p_vpo_{i}")
+                        new_op = st.text_input(
+                            "Operation No.", rule.get("op_no", ""), key=f"p_op_{i}"
+                        )
+                        new_vpo = st.text_input(
+                            "VPO Code", rule.get("vpo_code", ""), key=f"p_vpo_{i}"
+                        )
                         _side_options = ["R", "L", "C"]
                         _side_raw = str(rule.get("side", "R") or "R").strip().upper()
                         _side_default = _side_raw if _side_raw in _side_options else "R"
                         new_side = st.selectbox(
-                            "Side", _side_options, index=_side_options.index(_side_default), key=f"p_side_{i}"
+                            "Side",
+                            _side_options,
+                            index=_side_options.index(_side_default),
+                            key=f"p_side_{i}",
                         )
                     with c3:
                         parser = rule.get("parser", {})
                         _ftype_options = ["excel", "csv"]
-                        _ftype_raw = str(parser.get("file_type", "excel") or "excel").strip().lower()
-                        _ftype_default = _ftype_raw if _ftype_raw in _ftype_options else "excel"
-                        new_ftype = st.selectbox(
-                            "File Type", _ftype_options, index=_ftype_options.index(_ftype_default), key=f"p_ft_{i}"
+                        _ftype_raw = (
+                            str(parser.get("file_type", "excel") or "excel")
+                            .strip()
+                            .lower()
                         )
-                        new_hrow = st.number_input("Header Row", value=parser.get("header_row", 0), min_value=0, key=f"p_hr_{i}")
+                        _ftype_default = (
+                            _ftype_raw if _ftype_raw in _ftype_options else "excel"
+                        )
+                        new_ftype = st.selectbox(
+                            "File Type",
+                            _ftype_options,
+                            index=_ftype_options.index(_ftype_default),
+                            key=f"p_ft_{i}",
+                        )
+                        new_hrow = st.number_input(
+                            "Header Row",
+                            value=parser.get("header_row", 0),
+                            min_value=0,
+                            key=f"p_hr_{i}",
+                        )
                         new_drow = st.number_input(
-                            "Data Start Row", value=parser.get("data_start_row", 1), min_value=0, key=f"p_dr_{i}"
+                            "Data Start Row",
+                            value=parser.get("data_start_row", 1),
+                            min_value=0,
+                            key=f"p_dr_{i}",
                         )
                         new_vcol = st.number_input(
-                            "Value Column Index", value=parser.get("value_column_idx", 5), min_value=0, key=f"p_vc_{i}"
+                            "Value Column Index",
+                            value=parser.get("value_column_idx", 5),
+                            min_value=0,
+                            key=f"p_vc_{i}",
                         )
 
                     if st.button(f"💾 Save Rule {i + 1}", key=f"save_rule_{i}"):
@@ -1526,13 +1693,17 @@ elif page == "Settings":
                                     "header_row": int(new_hrow),
                                     "data_start_row": int(new_drow),
                                     "value_column_idx": int(new_vcol),
-                                    "excel_sheet_index": parser.get("excel_sheet_index", -1),
+                                    "excel_sheet_index": parser.get(
+                                        "excel_sheet_index", -1
+                                    ),
                                 },
                             }
                         )
                         with open(PARTS_3D_CFG_PATH, "w", encoding="utf-8") as f:
                             json.dump(parts_cfg, f, indent=2, ensure_ascii=False)
-                        st.success("✅ Rule saved. Restart the ETL daemon for changes to take effect.")
+                        st.success(
+                            "✅ Rule saved. Restart the ETL daemon for changes to take effect."
+                        )
 
             st.markdown("---")
             st.info(
@@ -1549,12 +1720,23 @@ elif page == "Settings":
 
         with st.form("db_config_form"):
             new_host = st.text_input("Host", db_cfg.get("host", ""))
-            new_port = st.number_input("Port", value=int(db_cfg.get("port", 5432)), min_value=1, max_value=65535)
+            new_port = st.number_input(
+                "Port",
+                value=int(db_cfg.get("port", 5432)),
+                min_value=1,
+                max_value=65535,
+            )
             new_db = st.text_input("Database Name", db_cfg.get("dbname", ""))
             new_user = st.text_input("Username", db_cfg.get("user", ""))
-            new_pass = st.text_input("Password", db_cfg.get("password", ""), type="password")
-            new_min = st.number_input("Pool Min Connections", value=2, min_value=1, max_value=50)
-            new_max = st.number_input("Pool Max Connections", value=15, min_value=1, max_value=100)
+            new_pass = st.text_input(
+                "Password", db_cfg.get("password", ""), type="password"
+            )
+            new_min = st.number_input(
+                "Pool Min Connections", value=2, min_value=1, max_value=50
+            )
+            new_max = st.number_input(
+                "Pool Max Connections", value=15, min_value=1, max_value=100
+            )
 
             submitted = st.form_submit_button("💾 Save Database Config")
             if submitted:
@@ -1570,5 +1752,7 @@ elif page == "Settings":
                 }
                 with open(CONFIG_PATH, "w", encoding="utf-8") as f:
                     json.dump(new_cfg, f, indent=2)
-                st.success("✅ Database config saved. Restart both the ETL daemon and this dashboard to apply.")
+                st.success(
+                    "✅ Database config saved. Restart both the ETL daemon and this dashboard to apply."
+                )
                 st.cache_resource.clear()

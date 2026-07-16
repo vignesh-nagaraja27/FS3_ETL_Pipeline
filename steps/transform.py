@@ -155,19 +155,26 @@ class TransformStep:
                 f"Verify that 'data_start_row' ({data_start_row}) and the file format are correct "
                 f"in machine_config['parser']."
             )
-
-        rows = self._parse_rows(
-            raw_df,
-            part_config,
-            value_col_idx,
-            spec_col_idx,
-            upper_col_idx,
-            lower_col_idx,
-            eval_col_idx,
-            meas_col_idx,
-            context,
-            log_id,
-        )
+        if machine_id == "KTS-7106":
+            rows = self._parse_kts7106(
+                raw_df,
+                part_config,
+                context,
+                log_id,
+            )
+        else:
+            rows = self._parse_rows(
+                raw_df,
+                part_config,
+                value_col_idx,
+                spec_col_idx,
+                upper_col_idx,
+                lower_col_idx,
+                eval_col_idx,
+                meas_col_idx,
+                context,
+                log_id,
+            )
 
         serial_no_m_last4 = self._derive_serial_no_m_last4_from_filename(file_path.name)
         if serial_no_m_last4:
@@ -594,6 +601,87 @@ class TransformStep:
                 f"[LOG_ID:{log_id}] TRANSFORM STEP: Skipped {skipped} blank/malformed rows (expected for sparse measurement files).",
                 **context,
             )
+
+        return rows
+
+    def _parse_kts7106(
+        self,
+        df: pd.DataFrame,
+        part_config: dict,
+        context: dict,
+        log_id: int,
+    ) -> List[Dict[str, Any]]:
+        vehicle_model = part_config.get("vehicle_model")
+        parts_code = part_config.get("parts_code")
+        op_no = part_config.get("op_no")
+        vpo_code = part_config.get("vpo_code")
+        side = part_config.get("side")
+
+        rows = []
+
+        for idx, row in df.iterrows():
+            try:
+                evaluation_item1_raw = self._get_optional_string_by_pos(row, 0)
+                # KTS-7106 business rule:
+                # # only rows with evaluation item are valid measurement rows
+                if not evaluation_item1_raw:
+                    continue
+                specification = self._get_optional_string_by_pos(row, 2)
+                upper_limit = self._get_optional_string_by_pos(row, 3)
+                lower_limit = self._get_optional_string_by_pos(row, 4)
+                measure_value = self._get_optional_string_by_pos(row, 5)
+
+                # skip only when value missing
+                if measure_value is None:
+                    LOGGER.info(
+                        f"[LOG_ID:{log_id}] SKIP VALUE ROW idx={idx} "
+                        f"raw_f={row.iloc[5]!r}",
+                        **context,
+                    )
+                    continue
+
+                evaluation_item1 = evaluation_item1_raw
+                measure_item = ""
+                measure_point = None
+
+                tokens = evaluation_item1_raw.split("_")
+
+                if len(tokens) >= 3:
+                    evaluation_item1 = tokens[0].strip()
+                    measure_item = tokens[1].strip()
+                    measure_point = "_".join(tokens[2:]).strip()
+
+                elif len(tokens) == 2:
+                    evaluation_item1 = tokens[0].strip()
+                    measure_item = tokens[1].strip()
+
+                rows.append(
+                    {
+                        "vehicle_model": vehicle_model,
+                        "parts_code": parts_code,
+                        "op_no": op_no,
+                        "vpo_code": vpo_code,
+                        "side": side,
+                        "evaluation_item1": evaluation_item1,
+                        "measure_item": measure_item,
+                        "measure_point": measure_point,
+                        "specification": specification,
+                        "upper_limit": upper_limit,
+                        "lower_limit": lower_limit,
+                        "measure_value": float(measure_value),
+                    }
+                )
+
+            except Exception as e:
+                LOGGER.warning(
+                    f"[LOG_ID:{log_id}] KTS-7106: Skipped row {idx} - {e}",
+                    **context,
+                )
+
+        LOGGER.info(
+            f"[LOG_ID:{log_id}] KTS-7106 parser created {len(rows)} rows.",
+            **context,
+        )
 
         return rows
 

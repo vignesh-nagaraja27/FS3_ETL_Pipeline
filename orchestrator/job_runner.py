@@ -267,6 +267,7 @@ class JobRunner:
         source_path = Path(machine_config["source_path"])
         machine_id = str(machine_config["machine_id"])
         poll_interval = machine_config.get("poll_interval_sec", 5)
+        ignore_prefixes = machine_config.get("ignore_file_prefixes", [])
         seen_files: set = set()
 
         while not self._stop_event.is_set():
@@ -278,6 +279,16 @@ class JobRunner:
 
                 for file_path in source_path.rglob("*"):
                     if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+                        continue
+                    # Ignore configured filename prefixes
+                    if any(
+                        file_path.name.upper().startswith(prefix.upper())
+                        for prefix in ignore_prefixes
+                    ):
+                        seen_files.add(str(file_path))
+                        LOGGER.info(
+                            f"[MC:{machine_id}] Ignoring file by prefix rule: {file_path.name}"
+                        )
                         continue
                     if str(file_path) in seen_files:
                         continue

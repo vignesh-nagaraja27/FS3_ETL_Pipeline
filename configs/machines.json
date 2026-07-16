@@ -25,21 +25,42 @@
         "lower_limit_column_idx": 6,
         "value_column_idx": 7,
         "excel_sheet_index": -1,
-        "layout_overrides": [
-          {
-            "file_pattern": "ﾁｬﾝﾊﾞｰ面高さ",
-            "header_row": null,
-            "data_start_row": 10
-          }
-        ]
+        "layout_overrides": []
       },
       "pipeline_type": "3D_HD",
       "version": "04530000",
-      "poll_interval_sec": 5,
-      "stable_wait_sec": 2,
+      "poll_interval_sec": 30,
+      "stable_wait_sec": 10,
+      "stable_required_count": 3,
+      "max_workers": 4,
+      "enabled": true
+    },
+    {
+      "machine_id": "KTS-7106",
+      "description": "Mitutoyo CMM -  Produces 3次元 BL GT3,RC,ENR  measurement files.",
+      "source_path": "C:\\FS3\\CMM\\Mitutoyo\\KTS-7106",
+      "parser": {
+        "file_type": "excel",
+        "header_row": null,
+        "data_start_row": 8,
+        "evaluation_item1_column_idx": 0,
+        "specification_column_idx": 2,
+        "upper_limit_column_idx": 3,
+        "lower_limit_column_idx": 4,
+        "value_column_idx": 5,
+        "excel_sheet_index": -1,
+        "layout_overrides": []
+      },
+      "pipeline_type": "3D_BL",
+      "version": "07106000",
+      "poll_interval_sec": 20,
+      "stable_wait_sec": 10,
       "stable_required_count": 3,
       "max_workers": 2,
-      "enabled": true
+      "enabled": true,
+      "ignore_file_prefixes": [
+        "E-NR-BLOCK"
+      ]
     }
   ],
   "conversion_watch": {

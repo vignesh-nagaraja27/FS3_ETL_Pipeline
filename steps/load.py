@@ -264,37 +264,76 @@ class LoadStep:
         """
         evaluation_item1 = row.get("evaluation_item1")
         measure_item = row.get("measure_item")
-        measure_position = row.get("measure_position")
+        measure_point = row.get("measure_point")
 
-        if not evaluation_item1 or not measure_item:
-            raise ValueError(
-                "LOAD STEP: Missing required business keys 'evaluation_item1' or 'measure_item'"
-            )
+        if mc_no == "KTS-7106":
+            if not evaluation_item1:
+                raise ValueError(
+                    "LOAD STEP: Missing required business key 'evaluation_item1'"
+                )
+            if not measure_item:
+                measure_item = ""
+                LOGGER.info(
+                    f"[LOG_ID:{log_id}] KTS-7106: measure_item missing. Using empty string.",
+                    **context,
+                )
+        else:
+            if not evaluation_item1 or not measure_item:
+                raise ValueError(
+                    "LOAD STEP: Missing required business keys 'evaluation_item1' or 'measure_item'"
+                )
 
         # SQL for finding the master record
-        search_sql = f"""
-            SELECT measure_no
-            FROM {TABLE_MASTER}
-            WHERE version = %s
-              AND vpo_code = %s
-              AND vehicle_model = %s
-              AND parts_code = %s
-              AND op_no = %s
-              AND evaluation_item1 = %s
-              AND measure_item = %s
-              AND specification IS NOT DISTINCT FROM %s::text
-            LIMIT 1;
-        """
-        search_params = (
-            version_value,
-            vpo_code,
-            vehicle_model,
-            parts_code,
-            op_no,
-            evaluation_item1,
-            measure_item,
-            specification,
-        )
+        if mc_no == "KTS-7106":
+            search_sql = f"""
+                SELECT measure_no
+                FROM {TABLE_MASTER}
+                WHERE version = %s
+                  AND vpo_code = %s
+                  AND vehicle_model = %s
+                  AND parts_code = %s
+                  AND op_no = %s
+                  AND evaluation_item1 = %s
+                  AND measure_item = %s
+                  AND measure_point IS NOT DISTINCT FROM %s::text
+                  AND specification IS NOT DISTINCT FROM %s::text
+                LIMIT 1;
+            """
+            search_params = (
+                version_value,
+                vpo_code,
+                vehicle_model,
+                parts_code,
+                op_no,
+                evaluation_item1,
+                measure_item,
+                measure_point,
+                specification,
+            )
+        else:
+            search_sql = f"""
+                SELECT measure_no
+                FROM {TABLE_MASTER}
+                WHERE version = %s
+                  AND vpo_code = %s
+                  AND vehicle_model = %s
+                  AND parts_code = %s
+                  AND op_no = %s
+                  AND evaluation_item1 = %s
+                  AND measure_item = %s
+                  AND specification IS NOT DISTINCT FROM %s::text
+                LIMIT 1;
+            """
+            search_params = (
+                version_value,
+                vpo_code,
+                vehicle_model,
+                parts_code,
+                op_no,
+                evaluation_item1,
+                measure_item,
+                specification,
+            )
 
         # ── 1. INITIAL CHECK (Optimization) ──
         cur.execute(search_sql, search_params)
@@ -420,7 +459,7 @@ class LoadStep:
             new_measure_no,
             evaluation_item1,
             measure_item,
-            measure_position,
+            measure_point,
             specification,
             upper_limit,
             lower_limit,
@@ -519,7 +558,7 @@ class LoadStep:
         measure_no: int,
         evaluation_item1: str,
         measure_item: str,
-        measure_position: Optional[str],
+        measure_point: Optional[str],
         specification: Optional[str],
         upper_limit: Optional[str],
         lower_limit: Optional[str],
@@ -532,7 +571,7 @@ class LoadStep:
         sql = f"""
             INSERT INTO {TABLE_MASTER}
                 (version, vpo_code, vehicle_model, parts_code, op_no, mc_no, measure_no, 
-                 evaluation_item1, measure_item, measure_position, specification, 
+                 evaluation_item1, measure_item, measure_point, specification, 
                  upper_limit, lower_limit, insert_date, update_date)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
         """
@@ -546,7 +585,7 @@ class LoadStep:
             measure_no,
             evaluation_item1,
             measure_item,
-            measure_position,
+            measure_point,
             specification,
             upper_limit,
             lower_limit,
