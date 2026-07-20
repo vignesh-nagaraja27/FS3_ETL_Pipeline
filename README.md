@@ -1,406 +1,484 @@
-# FS3 ETL Data Pipeline — Elite Edition
+# FS3 ETL Data Pipeline
 
-A configuration-driven, production-grade ETL system for processing 3D CMM measurement
-files into the FS3 PostgreSQL database.
+A production-grade, configuration-driven ETL platform for importing coordinate measuring machine (CMM) measurement data into the FS3 PostgreSQL database.
 
-Built to replace a fragile multi-script system prone to silent failures, connection leaks,
-and unreadable file naming conventions. Now hardened with Elite-Tier reliability fixes.
+The service monitors machine output folders, validates and transforms incoming Excel or CSV files, loads measurement data atomically, tracks every pipeline execution, recovers interrupted work, and routes failures through a Dead Letter Queue (DLQ). A Streamlit-based Mission Control dashboard provides operational visibility and retry controls.
 
----
+## Table of Contents
+
+- [Key Features](#key-features)
+- [Supported Machines](#supported-machines)
+- [Architecture](#architecture)
+- [Project Structure](#project-structure)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
+- [Processing Lifecycle](#processing-lifecycle)
+- [Machine-Specific Parsing](#machine-specific-parsing)
+- [Data Integrity and Reliability](#data-integrity-and-reliability)
+- [Database Objects](#database-objects)
+- [Dead Letter Queue and Retry](#dead-letter-queue-and-retry)
+- [Logging and Monitoring](#logging-and-monitoring)
+- [Troubleshooting](#troubleshooting)
+
+## Key Features
+
+- Automated monitoring of multiple machine output folders
+- Excel and CSV ingestion (`.xls`, `.xlsx`, `.xlsm`, and `.csv`)
+- Centralized runtime configuration through `configs/machines.json`
+- Per-machine parser definitions and worker limits
+- Concurrent processing with dynamically calculated executor capacity
+- File stability checks before processing
+- Duplicate and concurrent-processing prevention
+- Filename-prefix exclusion rules
+- Atomic PostgreSQL transactions with automatic rollback
+- Crash recovery for interrupted pipeline runs
+- Dead Letter Queue with operator-controlled retry
+- Structured, contextual logging
+- Mission Control dashboard for status, health, and failure visibility
+- PostgreSQL connection pooling
+
+## Supported Machines
+
+| Machine | Pipeline | Version | Workers | Special behavior |
+|---|---|---:|---:|---|
+| `KTSF-0453` | `3D_HD` | `04530000` | 4 | HD measurement processing |
+| `KTS-7106` | `3D_BL` | `07106000` | 2 | BL parsing, `measure_point`, and ignored filename prefixes |
+
+Machine details are configuration values, not hard-coded application behavior. Machines can be added, disabled, or tuned in `configs/machines.json`.
+
+## Architecture
+
+```text
+Machine output folders
+          │
+          ▼
+     Job Runner
+  folder watchers + worker pool
+          │
+          ▼
+      Dispatcher
+  pipeline classification
+          │
+          ▼
+      Pipeline3D
+          │
+          ├── Copy       validate, deduplicate, route to _processing
+          ├── Transform  parse, clean, normalize
+          ├── Load       resolve master + insert measurements atomically
+          └── Finalize   route to completed or _NG
+          │
+          ▼
+  FS3 PostgreSQL database
+          │
+          ├── Pipeline state and audit records
+          ├── Measurement master and transaction data
+          └── Dead Letter Queue
+```
+
+## Project Structure
+
+```text
+ETL_Pipeline/
+├── main.py                     # ETL service entry point
+├── dashboard.py                # Streamlit Mission Control dashboard
+├── config_loader.py            # Loads and validates runtime configuration
+├── configs/
+│   ├── machines.json           # Machines, parsers, workers, and file rules
+│   └── db_config.json          # PostgreSQL connection configuration
+├── orchestrator/
+│   ├── job_runner.py           # Watchers, worker pool, recovery, DLQ retry
+│   └── dispatcher.py           # Routes files to the appropriate pipeline
+├── pipelines/
+│   └── pipeline_3d.py          # Copy → Transform → Load → Finalize workflow
+├── steps/
+│   ├── copy.py                 # Stability checks, duplicates, file routing
+│   ├── transform.py            # Excel/CSV parsing and normalization
+│   ├── load.py                 # Master resolution and measurement inserts
+│   └── finalize.py             # Success and failure file handling
+├── db/
+│   └── db_handler.py           # Thread-safe PostgreSQL connection pool
+├── state/
+│   └── status_manager.py       # Pipeline state and retry management
+├── utils/
+│   └── logger.py               # Structured application logging
+└── logs/
+    └── etl_pipeline.log        # Rotating runtime log
+```
+
+> `parts_3d.json` and `parts_checksheet.json` belong to the previous architecture and are no longer used. Runtime machine and parser behavior now comes from `configs/machines.json`.
 
 ## Quick Start
 
+### Prerequisites
+
+- Python 3
+- Access to the FS3 PostgreSQL database
+- Required FS3 control and measurement tables
+- Read/write access to configured machine source folders
+
+### 1. Install dependencies
+
 ```bash
-# 1. Fill in your database credentials
-notepad ETL_Pipeline/configs/db_config.json
-
-# 2. Apply the database schema (run ONCE on your PostgreSQL server)
-psql -h YOUR_HOST -U YOUR_USER -d YOUR_DB -f ETL_Pipeline/schema_mission_control.sql
-
-# 3. Run the system
-python ETL_Pipeline/main.py
-
-# 4. Open the Mission Control Dashboard (separate terminal)
-streamlit run ETL_Pipeline/dashboard.py
+pip install psycopg2-binary pandas openpyxl streamlit
 ```
 
-The system starts immediately and monitors all machine folders defined in `configs/machines.json`.
+### 2. Configure PostgreSQL
 
----
-
-## What Problem Does This Solve?
-
-The previous system (`3D_HD_01` through `3D_HD_05`) had four critical flaws:
-
-| Problem | Symptom | Root Cause |
-|---|---|---|
-| **RC Model OP010 never saved** | Data visible in staging but missing from `pre_m_cmm` | `sync_pre_m_1to1_from_pre_f()` silently skipped new records |
-| **Connection exhaustion** | Database server slowdowns / connection refused | New `psycopg2.connect()` opened on every loop tick |
-| **Cryptic file naming** | `♡file.csv` → `★file.csv` → `●file.csv` | State tracked by renaming files with Japanese symbols |
-| **Regex crash for RC files** | Files moved to `並び替えNG` | `parse_keys_from_filename()` split on `_` producing just `"RC"` with no R/L digit match |
-
-All four are resolved in this redesign.
-
----
-
-## Elite-Tier Reliability Fixes (v2)
-
-This version passed a rigorous 6-scenario QA audit. Four critical issues were found and fixed.
-
-### Fix 1 — Atomic Concurrency Lock (Scenario 1: "Burst" Test)
-
-**Problem:** The old `_is_file_processed()` → `register()` pattern was a TOCTOU race condition.
-Two machine watcher threads could both read "file not processed," both pass the check, and both
-attempt to insert the same file simultaneously — causing duplicate DB rows and double processing.
-
-**Fix:** `StatusManager.register()` now uses a **PostgreSQL partial unique index** as an
-atomic server-side lock:
-
-```sql
--- Required index (included in schema_mission_control.sql):
-CREATE UNIQUE INDEX idx_pipeline_active_file
-    ON fs3.etl_pipeline_log(file_name)
-    WHERE (status IN ('PENDING', 'PROCESSING'));
-
--- The atomic INSERT in register():
-INSERT INTO etl_pipeline_log (...) VALUES (...)
-ON CONFLICT (file_name) WHERE (status IN ('PENDING', 'PROCESSING'))
-DO NOTHING
-RETURNING id;
-```
-
-If two threads race: only ONE gets an `id` back. The other gets `NULL` and skips.
-**The database enforces the lock — not application code.**
-
----
-
-### Fix 2 — ACID Ghost Data Elimination (Scenario 3: "Ghost Data" Test)
-
-**Problem:** `load.py` opened **three separate connections** — one per stage (staging,
-master, transaction). Each committed independently. If `_insert_transaction()` failed after
-`_upsert_master()` succeeded, a **Ghost Master Record** was created: `pre_m_cmm` had a
-definition row but `pre_t_cmm` had no measurement values.
-
-**Fix:** The entire LOAD step now runs inside **one atomic transaction** owned by `pipeline_3d.py`:
-
-```python
-# pipeline_3d.py — single transaction boundary:
-with self._db.get_connection() as conn:       # ← ONE connection
-    committed = load_step.run(..., conn=conn)  # ← all 3 stages share this cursor
-# conn.commit() if success │ conn.rollback() if ANY exception
-```
-
-`load.py` now receives a cursor and executes SQL only — **it never calls commit or rollback**.
-The `ConnectionContext.__exit__` in `db_handler.py` handles the commit/rollback atomically.
-
-**Result:** All rows for a file commit together, or **none** do. Zero ghost records.
-
----
-
-### Fix 3 — Startup Self-Healing (Scenario 5: "Double Process" Test)
-
-**Problem:** If the server crashed mid-run, rows stayed at `status='PROCESSING'` in
-`etl_pipeline_log` forever. The watcher's `_is_file_processed()` saw them as "active"
-and never re-queued them. Files were permanently stuck without operator intervention.
-
-**Fix:** `JobRunner.start()` calls `_cleanup_stale_tasks()` before launching any watcher threads:
-
-```python
-UPDATE fs3.etl_pipeline_log
-SET status = 'PENDING', current_step = 'STALE_RESET', updated_at = NOW()
-WHERE status = 'PROCESSING'
-RETURNING id, file_name;
-```
-
-On every restart, stale files are automatically reset to `PENDING` and re-enter the queue
-within one poll cycle. **The system heals itself.**
-
-Additionally, `_is_file_processed()` now uses a 30-minute timeout: a `PROCESSING` entry older
-than 30 minutes is treated as a crash victim and allowed back into the queue immediately.
-
----
-
-### Fix 4 — Complete DLQ Retry (Scenario 6: "Dead Letter" Test)
-
-**Problem:** The original "🔁 Retry" button only set `dlq_status='RETRYING'` in the database.
-It did **not** move the file, reset the pipeline log, or trigger any re-processing. Clicking
-Retry was effectively a no-op.
-
-**Fix:** The Retry button now executes a 5-step sequence:
-
-```
-Step 1: Guard — enforce max_retries limit
-Step 2: Read machines.json to find the machine's source_path
-Step 3: shutil.move(ng_path → source_path)   ← PHYSICAL FILE MOVE
-Step 4: UPDATE etl_pipeline_log SET status='PENDING'  ← DB RESET
-Step 5: UPDATE etl_dlq SET dlq_status='RETRYING'     ← TRIGGER FLAG
-```
-
-A new dedicated background thread in `job_runner.py` (`_watch_dlq_retrying`) polls for
-`RETRYING` entries every 15 seconds, claims them atomically, and re-submits to the pipeline
-executor using the **original log_id** (no duplicate log rows).
-
----
-
-## Architecture Overview
-
-```
-ETL_Pipeline/
-│
-├── main.py                     # Entry point. Run this to start everything.
-│
-├── config_loader.py            # Reads all JSON configs at startup. Central config API.
-│
-├── configs/                    # The "brain" — edit these, not Python files.
-│   ├── db_config.json          # Database credentials (fill this in before running).
-│   ├── machines.json           # Which CMM machines to watch and how.
-│   ├── parts_3d.json           # Rules: filename → vehicle model + part + parser settings.
-│   └── parts_checksheet.json   # Same but for checksheet files.
-│
-├── orchestrator/               # The supervisors.
-│   ├── job_runner.py           # Starts watcher threads. Routes files. Manages thread pool.
-│   │                           # v2: Startup cleanup + DLQ retry watcher thread.
-│   └── dispatcher.py           # Classifies a file: 3D_HD? 3D_BL? CHECKSHEET? UNKNOWN?
-│
-├── pipelines/                  # Assembly lines — step sequencing logic.
-│   └── pipeline_3d.py          # COPY → TRANSFORM → LOAD (single txn) → FINALIZE.
-│                               # v2: Atomic transaction wrapper + DLQ retry path.
-│
-├── steps/                      # Atomic workers. Each does one job only.
-│   ├── copy.py                 # Waits for file stability, checks for duplicates, moves file.
-│   ├── transform.py            # Reads CSV/Excel using config parser settings. Returns clean rows.
-│   ├── load.py                 # v2: Single-cursor executor (no internal commits).
-│   └── finalize.py             # Moves file to _completed or _NG based on outcome.
-│
-├── state/
-│   └── status_manager.py       # v2: Atomic register() with ON CONFLICT partial index.
-│                               # New reset_for_retry() for DLQ retry path.
-│
-├── db/
-│   └── db_handler.py           # Singleton connection pool (psycopg2.ThreadedConnectionPool).
-│
-├── utils/
-│   └── logger.py               # Structured logger. Logs include [MC] [MODEL] [PART] [OP].
-│
-├── dashboard.py                # Mission Control Dashboard (Streamlit).
-│                               # v2: Retry button physically moves file + resets pipeline log.
-│
-└── schema_mission_control.sql  # All CREATE TABLE + CREATE INDEX statements.
-                                # v2: Includes idx_pipeline_active_file partial unique index.
-```
-
----
-
-## How Data Flows (Step by Step)
-
-```
-CMM Machine Folder
-       │
-       │  (file lands: 193E_R10_連続測定_..._20251126.xlsx)
-       ▼
-[1] Job Runner polls folder every 5 seconds (case-insensitive extension check)
-       │
-       ▼
-[2] Dispatcher checks filename against parts_3d.json (re.IGNORECASE)
-       │   match_pattern: "^193E_R" → vehicle_model: RC, op_no: OP010
-       ▼
-[3] Pipeline3D.run() starts
-       │
-       ├─[REGISTER]─────────  StatusManager.register() — ATOMIC DB CLAIM
-       │                      ON CONFLICT (file_name) WHERE PENDING/PROCESSING
-       │                      → returns log_id or None (another thread got it)
-       │
-       ├─[COPY STEP]────────  Wait for file stability (size polling)
-       │                      Duplicate check (pre_l_3d_dldate)
-       │                      Move to _processing/
-       │
-       ├─[TRANSFORM STEP]───  Read Excel/CSV using parser config (header_row, etc.)
-       │                      Clean NaN rows, parse measure_no and measure_value
-       │
-       ├─[LOAD STEP]─────────────────────────────────────────────────────────────
-       │  ┌─ SINGLE ATOMIC TRANSACTION ─────────────────────────────────────────┐
-       │  │  with db.get_connection() as conn:                                  │
-       │  │      for each row:                                                  │
-       │  │          INSERT into pre_f_3d_hd  (staging)     ─ no commit        │
-       │  │          UPSERT into pre_m_cmm    (master)      ─ no commit        │
-       │  │          INSERT into pre_t_cmm    (transaction) ─ no commit        │
-       │  │  ↓ all succeed → conn.COMMIT() ← one atomic write                  │
-       │  │  ↓ any fail   → conn.ROLLBACK() ← zero partial data                │
-       │  └─────────────────────────────────────────────────────────────────────┘
-       │
-       └─[FINALIZE STEP]────  Move to _completed/ (success)
-                              OR _NG/ (failure → DLQ entry created)
-```
-
----
-
-## The State Machine (Replacing the Symbols)
-
-Every pipeline run is tracked in the `fs3.etl_pipeline_log` table.
-
-```
-PENDING ──► PROCESSING ──► COMPLETED
-                  │
-                  └────────► FAILED ──► DLQ (AWAITING_REVIEW)
-                                              │
-                                    [Operator clicks Retry]
-                                              │
-                                    ┌─────────────────────┐
-                                    │ Dashboard:           │
-                                    │ 1. Move file _NG→src │
-                                    │ 2. Reset log→PENDING │
-                                    │ 3. DLQ→RETRYING      │
-                                    └──────────┬──────────┘
-                                               │
-                                    [DLQ Watcher Thread]
-                                               │
-                                               ▼
-                                          PROCESSING ──► COMPLETED
-```
-
-To check what failed and why:
-```sql
--- Show all failures in the last 24 hours
-SELECT file_name, vehicle_model, parts_code, op_no, current_step, error_message, updated_at
-FROM fs3.etl_pipeline_log
-WHERE status = 'FAILED'
-  AND updated_at > NOW() - INTERVAL '24 hours'
-ORDER BY updated_at DESC;
-
--- What's in the Dead Letter Queue right now?
-SELECT file_name, machine_id, failed_step, error_category, retry_count, queued_at
-FROM fs3.etl_dlq
-WHERE dlq_status = 'AWAITING_REVIEW'
-ORDER BY queued_at DESC;
-```
-
----
-
-## Database Schema — Required Objects
-
-Run `schema_mission_control.sql` **once** on your PostgreSQL server. It creates:
-
-| Object | Type | Purpose |
-|---|---|---|
-| `fs3.etl_pipeline_log` | TABLE | Per-file state machine (PENDING → COMPLETED/FAILED) |
-| `fs3.etl_audit_log` | TABLE | Structured event log for all pipeline activity |
-| `fs3.etl_dlq` | TABLE | Dead Letter Queue — failed files awaiting retry |
-| `fs3.etl_machine_registry` | TABLE | CMM machine heartbeat and health tracking |
-| `idx_pipeline_active_file` | **UNIQUE PARTIAL INDEX** | **Critical:** enables atomic file claim in `register()` |
-| `fs3.v_etl_today_kpis` | VIEW | Pre-built KPI view for the dashboard Overview pillar |
-| `fs3.v_etl_hourly_throughput` | VIEW | 12-hour throughput chart data |
-| `fs3.v_machine_health` | VIEW | Machine ONLINE/IDLE/WARNING status |
-
-### Measurement Tables (pre-existing in FS3)
-
-| Table | Schema | Purpose |
-|---|---|---|
-| `pre_l_vehicle_model` | `fs3` | Lookup: filename prefix → vehicle model code |
-| `pre_l_3d_dldate` | `fs3` | Duplicate detection: records filename + file size per import |
-| `pre_f_3d_hd` | `fs3` | Staging table for 3D HD measurement rows |
-| `pre_f_3d_bl` | `fs3` | Staging table for 3D BL measurement rows |
-| `pre_m_cmm` | `fs3` | **Master table**: measurement definitions per model/op |
-| `pre_t_cmm` | `fs3` | **Transaction table**: actual measurement values |
-| `pre_w_3d_hd` | `fs3` | Conversion mapping staging (populated by conversion import) |
-
----
-
-## How to Add a New Vehicle Model or Part
-
-You do **not** need to touch any Python files.
-
-**Step 1:** Open `ETL_Pipeline/configs/parts_3d.json`
-
-**Step 2:** Add a new object to the `"mappings"` array:
+Update `configs/db_config.json`:
 
 ```json
 {
-  "match_pattern": "^NEW_MODEL_R",
-  "description": "New Vehicle Model X - Right Hand Side - OP030",
-  "vehicle_model": "X",
-  "parts_code": "HD-RH",
-  "side": "R",
-  "op_no": "OP030",
-  "vpo_code": "VPO-X-R30",
+  "host": "localhost",
+  "port": 5432,
+  "database": "FS3",
+  "user": "postgres",
+  "password": "replace-with-your-password"
+}
+```
+
+> Do not commit real credentials. Keep production secrets outside version control and provide only a safe example configuration in the repository.
+
+### 3. Configure machines
+
+Define each machine in `configs/machines.json`. Confirm that its source path exists and that the service account can read and move files there.
+
+### 4. Start the ETL service
+
+From the project root:
+
+```bash
+python main.py
+```
+
+### 5. Start Mission Control
+
+In a separate terminal:
+
+```bash
+streamlit run dashboard.py
+```
+
+## Configuration
+
+### Single source of runtime behavior
+
+The current architecture requires only two configuration files:
+
+```text
+configs/
+├── machines.json
+└── db_config.json
+```
+
+`machines.json` defines:
+
+- Machine identity and source folder
+- Pipeline type and version
+- Whether the watcher is enabled
+- Per-machine concurrency
+- Ignored filename prefixes
+- File parsing rules and column locations
+
+### Machine example
+
+```json
+{
+  "machine_id": "KTS-7106",
+  "source_path": "C:\\FS3\\CMM\\Mitutoyo\\KTS-7106",
+  "pipeline_type": "3D_BL",
+  "version": "07106000",
+  "max_workers": 2,
+  "enabled": true,
+  "ignore_file_prefixes": [
+    "E-NR-BLOCK"
+  ],
   "parser": {
     "file_type": "excel",
-    "header_row": 10,
-    "data_start_row": 11,
-    "value_column_idx": 7,
-    "measure_no_col_idx": 12,
+    "header_row": null,
+    "data_start_row": 8,
+    "evaluation_item1_column_idx": 0,
+    "specification_column_idx": 2,
+    "upper_limit_column_idx": 3,
+    "lower_limit_column_idx": 4,
+    "value_column_idx": 5,
     "excel_sheet_index": -1
   }
 }
 ```
 
-**Step 3:** Save the file and restart the service. Done.
+Restart the ETL service after changing configuration.
 
-> **Tip:** The `match_pattern` is a regular expression matched **case-insensitively** against the filename. This means `.CSV`, `.XLSX`, Japanese characters in filenames (e.g. `193E_R10_連続_9999_20260702.xlsx`) all work correctly.
+### Worker scaling
 
----
-
-## How to Add a New Machine
-
-Open `ETL_Pipeline/configs/machines.json` and add to `"watch_directories"`:
+Each machine defines its concurrency independently:
 
 ```json
+"max_workers": 4
+```
+
+At startup, the Job Runner calculates the shared executor capacity:
+
+```text
+total_workers = sum(machine.max_workers)
+```
+
+With the current configuration:
+
+```text
+KTSF-0453: 4 workers
+KTS-7106:  2 workers
+Total:     6 workers
+```
+
+Worker counts can therefore be tuned without changing Python code. Choose values that reflect machine volume, database capacity, and available server resources.
+
+### Ignored filename prefixes
+
+A machine can exclude files before classification and processing:
+
+```json
+"ignore_file_prefixes": [
+  "E-NR-BLOCK"
+]
+```
+
+| Filename | Result |
+|---|---|
+| `E-NR-BLOCK_001.xls` | Ignored |
+| `E-NR-BLOCK_RC.xlsx` | Ignored |
+| `RC_001.xls` | Processed |
+| `GT3_001.xls` | Processed |
+
+## Processing Lifecycle
+
+### 1. Detect
+
+The Job Runner monitors every enabled machine source folder for supported files. Ignore-prefix rules are applied before the file is classified or submitted to a worker.
+
+### 2. Copy
+
+The Copy step:
+
+- Waits until the file is stable and no longer being written
+- Checks whether the file has already been imported or claimed
+- Registers the pipeline run
+- Routes the claimed file into `_processing`
+
+### 3. Transform
+
+The Transform step:
+
+- Reads the configured Excel sheet or CSV content
+- Applies machine-specific row and column settings
+- Removes invalid or empty input
+- Parses measurement identities and values
+- Produces normalized row dictionaries for the Load step
+
+Conceptual output:
+
+```python
 {
-  "machine_id": "NEW-MACHINE-001",
-  "description": "New Zeiss CMM - Hall E, Line 2",
-  "source_path": "C:/CMM/Zeiss/NEW-MACHINE-001/Output",
-  "pipeline_type": "3D_HD",
-  "poll_interval_sec": 5,
-  "stable_wait_sec": 2,
-  "stable_required_count": 3,
-  "max_workers": 2,
-  "enabled": true
+    "evaluation_item1": "...",
+    "measure_item": "...",
+    "measure_point": "...",
+    "measure_value": "...",
+    "upper_limit": "...",
+    "lower_limit": "..."
 }
 ```
 
-Restart the service. The new machine watcher starts automatically.
+The exact fields depend on the configured pipeline and source format.
 
----
+### 4. Load
 
-## Log Format
+The Load step resolves or creates the measurement master record and inserts the associated transaction values. All database writes for the file share one connection and one transaction.
 
-Every log line tells you exactly where and why something happened:
+### 5. Finalize
 
-```
-[2026-07-02 17:10:03] [ERROR] [PID:4821] [MC: KTSF-0453] [MODEL: RC] [PART: HD-RH] [OP: OP010]
- - [LOG_ID:42] [ROW:1/200] [MEASURE_NO:3] LOAD STEP FAILED.
-   ALL 0 previously staged rows will ROLLBACK automatically.
-   Root cause: DataError: invalid input syntax for type numeric
-```
+- Successful files are moved to the completed location and marked `COMPLETED`.
+- Failed files are moved to `_NG`, marked `FAILED`, and registered in the DLQ for operator review.
 
-Log files rotate at 10 MB with 5 backups kept in `ETL_Pipeline/logs/etl_pipeline.log`.
+## Machine-Specific Parsing
 
----
+### KTS-7106 `measure_point`
 
-## Python Dependencies
+KTS-7106 separates a source measurement label into three identity fields.
 
-```
-psycopg2-binary
-pandas
-openpyxl
-streamlit
-```
+```text
+Input:
+右デッキ面ﾎﾞｱ裏面取り_直径_1
 
-Install with:
-```bash
-pip install psycopg2-binary pandas openpyxl streamlit
+Normalized:
+evaluation_item1 = 右デッキ面ﾎﾞｱ裏面取り
+measure_item     = 直径
+measure_point    = 1
 ```
 
----
+`measure_point` participates in master-record resolution for KTS-7106. Measurements such as the following therefore resolve to distinct master records:
 
-## Troubleshooting Common Issues
+```text
+直径_1
+直径_2
+直径_3
+直径_4
+```
 
-| Symptom | Where to Look | What to Check |
+This prevents separate physical measurement points from being merged under one master definition.
+
+## Data Integrity and Reliability
+
+### Atomic load transaction
+
+Every file is loaded within one PostgreSQL transaction:
+
+```sql
+BEGIN;
+-- Resolve or insert master records
+-- Insert transaction measurements
+COMMIT;
+```
+
+If any row or database operation fails, the complete transaction is rolled back:
+
+```sql
+ROLLBACK;
+```
+
+The guarantee is:
+
+```text
+All writes for the file are committed
+OR
+No writes for the file are committed
+```
+
+This prevents ghost master records in `fs3.pre_m_cmm` without corresponding values in `fs3.pre_t_cmm`.
+
+### Concurrent claim protection
+
+Pipeline registration uses the database as the authority for active file claims. This prevents multiple watcher threads from processing the same active file concurrently.
+
+### Connection pooling
+
+Database connections come from a thread-safe shared pool instead of opening a new connection on every polling cycle or load stage. Connections are returned to the pool after use.
+
+### Crash recovery
+
+At startup, `_cleanup_stale_tasks()` resets interrupted `PROCESSING` records to `PENDING`. This allows abandoned work to re-enter the normal processing lifecycle instead of remaining permanently stuck.
+
+## Database Objects
+
+### Control and observability
+
+| Object | Purpose |
+|---|---|
+| `fs3.etl_pipeline_log` | Per-file processing state, current step, and failure details |
+| `fs3.etl_dlq` | Failed-file review and retry state |
+| `fs3.etl_machine_registry` | Machine registration, heartbeat, and health |
+| `fs3.etl_audit_log` | Structured pipeline events and audit history |
+
+### Measurement data
+
+| Object | Purpose |
+|---|---|
+| `fs3.pre_f_3d_hd` | Staging data for 3D HD measurements |
+| `fs3.pre_f_3d_bl` | Staging data for 3D BL measurements |
+| `fs3.pre_m_cmm` | Measurement master definitions |
+| `fs3.pre_t_cmm` | Imported measurement transaction values |
+| `fs3.pre_w_3d_hd` | HD conversion-mapping staging data |
+
+## Dead Letter Queue and Retry
+
+When processing fails, the file is moved to `_NG` and an entry is created in `fs3.etl_dlq`.
+
+```text
+FAILED
+   │
+   ▼
+AWAITING_REVIEW
+   │ operator requests retry
+   ▼
+RETRYING
+   │ retry watcher claims the work
+   ▼
+PROCESSING
+   ├──► COMPLETED
+   └──► FAILED
+```
+
+A retry returns the physical file to the configured machine source path, resets its pipeline state, and resubmits it through the normal workflow. Retry limits protect the service from uncontrolled failure loops.
+
+To inspect the current queue:
+
+```sql
+SELECT
+    file_name,
+    machine_id,
+    failed_step,
+    error_category,
+    retry_count,
+    dlq_status,
+    queued_at
+FROM fs3.etl_dlq
+ORDER BY queued_at DESC;
+```
+
+To inspect recent failed pipeline runs:
+
+```sql
+SELECT
+    file_name,
+    machine_id,
+    vehicle_model,
+    parts_code,
+    op_no,
+    current_step,
+    error_message,
+    updated_at
+FROM fs3.etl_pipeline_log
+WHERE status = 'FAILED'
+ORDER BY updated_at DESC;
+```
+
+## Logging and Monitoring
+
+Logs include operational context such as:
+
+- Machine ID
+- Vehicle model
+- Part code
+- Operation number
+- Pipeline log ID
+- Current processing step
+- Error details when applicable
+
+Example:
+
+```text
+[2026-07-20 08:30:20] [INFO]
+[MC:KTS-7106] [MODEL:RC] [PART:BL] [OP:OP020] [LOG_ID:42]
+LOAD STEP STARTED
+```
+
+Runtime logs are written to `logs/etl_pipeline.log`. Mission Control reads the control tables to provide pipeline status, machine health, throughput, and DLQ actions.
+
+## Troubleshooting
+
+| Symptom | Check | Likely cause or action |
 |---|---|---|
-| File not picked up | `etl_pipeline.log` | Is filename matched by any `match_pattern` in `parts_3d.json`? |
-| RC/OP010 still not in master | `etl_pipeline_log` table | Check `current_step` and `error_message` columns |
-| "Connection pool exhausted" | `etl_pipeline.log` | Increase `max_conn` in `db_config.json` |
-| File stuck in `_processing` | System restart | `_cleanup_stale_tasks()` resets it automatically on next start |
-| Retry button does nothing | `etl_pipeline.log` | Check DLQ watcher logs — `[DLQ-WATCHER]` prefix |
-| Ghost master records | Schema check | Ensure `idx_pipeline_active_file` partial index exists in DB |
-| "Config file missing" on startup | Terminal output | Run `notepad configs/db_config.json` and fill in credentials |
-| File at _NG, retry fails | Dashboard error | Confirm `file_path` in DLQ matches actual file location |
+| File is not detected | `source_path`, `enabled`, extension | Incorrect folder, disabled machine, or unsupported file type |
+| File is intentionally skipped | `ignore_file_prefixes` | Filename starts with a configured excluded prefix |
+| File remains in `_processing` | Startup recovery and logs | Restart the service and confirm stale-task cleanup runs |
+| File is moved to `_NG` | `etl_pipeline.log` and `fs3.etl_dlq` | Review `failed_step`, `error_category`, and error details |
+| Retry does not start | DLQ status and watcher logs | Confirm the entry reaches `RETRYING` and its source path is valid |
+| Database connection fails | `db_config.json` and PostgreSQL availability | Verify host, port, credentials, network, and database service |
+| Connection pool is exhausted | Worker totals and pool settings | Reduce workers or increase pool capacity within DB limits |
+| Wrong columns are parsed | Machine `parser` settings | Verify row offsets, column indexes, and Excel sheet index |
+| Service fails at startup | Both configuration files | Check for missing files, malformed JSON, or unavailable database |
+
+## Current Architecture
+
+**Edition:** Machine-Configuration Edition  
+**Runtime source of truth:** `configs/machines.json`
+
+Vehicle-model mapping files are no longer required. New machine behavior should be introduced through machine configuration and its parser definition wherever the existing pipeline supports it.
