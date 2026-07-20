@@ -11,7 +11,6 @@ purely by JSON — no hardcoded values in Python logic files.
 """
 
 import json
-import re
 from pathlib import Path
 from typing import Optional
 
@@ -29,8 +28,8 @@ class ConfigLoader:
     def __init__(self, configs_dir: Path = _CONFIGS_DIR):
         self._dir = configs_dir
         self.machines: dict = self._load("machines.json")
-        self.parts_3d: list = self._load("parts_3d.json").get("mappings", [])
-        self.parts_checksheet: list = self._load("parts_checksheet.json").get("mappings", [])
+        self.parts_3d: list = []
+        self.parts_checksheet: list = []
         self.db: dict = self._load("db_config.json")
 
     def _load(self, filename: str) -> dict:
@@ -60,20 +59,20 @@ class ConfigLoader:
         Returns:
             dict: The matching part config, or None if no match is found.
         """
-        for mapping in self.parts_3d:
-            pattern = mapping.get("match_pattern", "")
-            if re.match(pattern, filename, re.IGNORECASE):
-                return mapping
+        # for mapping in self.parts_3d:
+        #     pattern = mapping.get("match_pattern", "")
+        #     if re.match(pattern, filename, re.IGNORECASE):
+        #         return mapping
         return None
 
     def match_checksheet_part(self, filename: str) -> Optional[dict]:
         """
         Same as match_3d_part but for checksheet files.
         """
-        for mapping in self.parts_checksheet:
-            pattern = mapping.get("match_pattern", "")
-            if re.match(pattern, filename, re.IGNORECASE):
-                return mapping
+        # for mapping in self.parts_checksheet:
+        #     pattern = mapping.get("match_pattern", "")
+        #     if re.match(pattern, filename, re.IGNORECASE):
+        #         return mapping
         return None
 
     def get_watch_directories(self) -> list:
