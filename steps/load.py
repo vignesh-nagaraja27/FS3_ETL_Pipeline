@@ -265,6 +265,7 @@ class LoadStep:
         evaluation_item1 = row.get("evaluation_item1")
         measure_item = row.get("measure_item")
         measure_point = row.get("measure_point")
+        reference_position = row.get("reference_position")
 
         if mc_no == "KTS-7106":
             if not evaluation_item1:
@@ -284,7 +285,33 @@ class LoadStep:
                 )
 
         # SQL for finding the master record
-        if mc_no == "KTS-7106":
+        if mc_no == "KTS-7898":
+            search_sql = f"""
+                SELECT measure_no
+                FROM {TABLE_MASTER}
+                WHERE version = %s
+                  AND vpo_code = %s
+                  AND vehicle_model = %s
+                  AND parts_code = %s
+                  AND op_no = %s
+                  AND evaluation_item1 = %s
+                  AND measure_item = %s
+                  AND reference_position IS NOT DISTINCT FROM %s::text
+                  AND specification IS NOT DISTINCT FROM %s::text
+                LIMIT 1;
+            """
+            search_params = (
+                version_value,
+                vpo_code,
+                vehicle_model,
+                parts_code,
+                op_no,
+                evaluation_item1,
+                measure_item,
+                reference_position,
+                specification,
+            )
+        elif mc_no == "KTS-7106":
             search_sql = f"""
                 SELECT measure_no
                 FROM {TABLE_MASTER}
@@ -460,6 +487,7 @@ class LoadStep:
             evaluation_item1,
             measure_item,
             measure_point,
+            reference_position,
             specification,
             upper_limit,
             lower_limit,
@@ -559,6 +587,7 @@ class LoadStep:
         evaluation_item1: str,
         measure_item: str,
         measure_point: Optional[str],
+        reference_position: Optional[str],
         specification: Optional[str],
         upper_limit: Optional[str],
         lower_limit: Optional[str],
@@ -571,9 +600,9 @@ class LoadStep:
         sql = f"""
             INSERT INTO {TABLE_MASTER}
                 (version, vpo_code, vehicle_model, parts_code, op_no, mc_no, measure_no, 
-                 evaluation_item1, measure_item, measure_point, specification, 
+                 evaluation_item1, measure_item, measure_point,reference_position, specification, 
                  upper_limit, lower_limit, insert_date, update_date)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,%s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
         """
         params = (
             version,
@@ -586,13 +615,16 @@ class LoadStep:
             evaluation_item1,
             measure_item,
             measure_point,
+            reference_position,
             specification,
             upper_limit,
             lower_limit,
         )
         cur.execute(sql, params)
         LOGGER.info(
-            f"[LOG_ID:{log_id}] INSERT MASTER: measure_no={measure_no}", **context
+            f"[LOG_ID:{log_id}] INSERT MASTER: measure_no={measure_no}"
+            f"reference_position='{reference_position}'",
+            **context,
         )
 
     def _advisory_lock_key(

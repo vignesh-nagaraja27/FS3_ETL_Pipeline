@@ -25,6 +25,7 @@ from utils.logger import LOGGER
 # Identifies the pipeline type based on dispatch result
 PIPELINE_3D_HD = "3D_HD"
 PIPELINE_3D_BL = "3D_BL"
+PIPELINE_3D_CR = "3D_CR"
 PIPELINE_CHECKSHEET = "CHECKSHEET"
 PIPELINE_UNKNOWN = "UNKNOWN"
 

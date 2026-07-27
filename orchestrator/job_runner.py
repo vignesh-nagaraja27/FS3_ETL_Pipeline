@@ -17,6 +17,7 @@ from orchestrator.dispatcher import (
     Dispatcher,
     PIPELINE_3D_HD,
     PIPELINE_3D_BL,
+    PIPELINE_3D_CR,
     PIPELINE_UNKNOWN,
 )
 from pipelines.pipeline_3d import Pipeline3D
@@ -386,7 +387,7 @@ class JobRunner:
         # ELITE FIX: Ensure machine_id is a string and not None
         machine_id = str(machine_config.get("machine_id", "UNKNOWN"))
         try:
-            if pipeline_type in (PIPELINE_3D_HD, PIPELINE_3D_BL):
+            if pipeline_type in (PIPELINE_3D_HD, PIPELINE_3D_BL, PIPELINE_3D_CR):
                 self._pipeline_3d.run(
                     source_path=file_path,
                     part_config=part_config,

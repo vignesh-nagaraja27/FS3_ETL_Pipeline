@@ -18,9 +18,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-
 import pandas as pd
-
 from utils.logger import LOGGER
 
 
@@ -130,26 +128,28 @@ class TransformStep:
             f"[LOG_ID:{log_id}] TRANSFORM STEP started. Reading '{file_path.name}' as '{file_type}'.",
             **context,
         )
+        if machine_id == "KTS-7898":
+            raw_df = pd.DataFrame()
+        else:
+            try:
+                raw_df = self._read_file(
+                    file_path,
+                    file_type,
+                    header_row,
+                    data_start_row,
+                    sheet_index,
+                    context,
+                    log_id,
+                )
+            except Exception as e:
+                LOGGER.error(
+                    f"[LOG_ID:{log_id}] TRANSFORM STEP: Failed to read '{file_path.name}'. Error: {e}",
+                    exc_info=True,
+                    **context,
+                )
+                raise
 
-        try:
-            raw_df = self._read_file(
-                file_path,
-                file_type,
-                header_row,
-                data_start_row,
-                sheet_index,
-                context,
-                log_id,
-            )
-        except Exception as e:
-            LOGGER.error(
-                f"[LOG_ID:{log_id}] TRANSFORM STEP: Failed to read '{file_path.name}'. Error: {e}",
-                exc_info=True,
-                **context,
-            )
-            raise
-
-        if raw_df.empty:
+        if machine_id != "KTS-7898" and raw_df.empty:
             raise ValueError(
                 f"[LOG_ID:{log_id}] TRANSFORM STEP: File '{file_path.name}' produced zero data rows. "
                 f"Verify that 'data_start_row' ({data_start_row}) and the file format are correct "
@@ -161,6 +161,10 @@ class TransformStep:
                 part_config,
                 context,
                 log_id,
+            )
+        elif machine_id == "KTS-7898":
+            rows = self._parse_kts7898(
+                file_path, part_config, machine_config, context, log_id
             )
         else:
             rows = self._parse_rows(
@@ -175,15 +179,21 @@ class TransformStep:
                 context,
                 log_id,
             )
-
-        serial_no_m_last4 = self._derive_serial_no_m_last4_from_filename(file_path.name)
+        if machine_id == "KTS-7898":
+            serial_no_m_last4 = self._derive_kts7898_serial_no(file_path.name)
+        else:
+            serial_no_m_last4 = self._derive_serial_no_m_last4_from_filename(
+                file_path.name
+            )
         if serial_no_m_last4:
             for r in rows:
                 r["serial_no_m_last4"] = serial_no_m_last4
-
-        measurement_datetime = self._derive_measurement_datetime_from_filename(
-            file_path.name
-        )
+        if machine_id == "KTS-7898":
+            measurement_datetime = self._derive_kts7898_datetime(file_path.name)
+        else:
+            measurement_datetime = self._derive_measurement_datetime_from_filename(
+                file_path.name
+            )
         if measurement_datetime:
             for r in rows:
                 r["measurement_datetime"] = measurement_datetime
@@ -193,6 +203,21 @@ class TransformStep:
             **context,
         )
         return rows
+
+    def _derive_kts7898_serial_no(
+        self,
+        file_name: str,
+    ) -> Optional[str]:
+        parts = Path(file_name).stem.split("_")
+        for i, part in enumerate(parts):
+            if re.fullmatch(r"\d{14}", part):
+                if i > 0:
+                    serial_no = parts[i - 1].strip()
+                    if serial_no:
+                        return serial_no
+        if parts:
+            serial_no = parts[-1].strip()
+            return serial_no if serial_no else None
 
     def _derive_serial_no_m_last4_from_filename(self, file_name: str) -> Optional[str]:
         try:
@@ -213,6 +238,39 @@ class TransformStep:
 
         normalized = re.sub(r"\s+", "", serial_part)
         return normalized if normalized else None
+
+    def _derive_kts7898_datetime(
+        self,
+        file_name: str,
+    ) -> Optional[datetime]:
+        parts = Path(file_name).stem.split("_")
+        # Generic format used by VN and future files
+        for part in parts:
+            if re.fullmatch(r"\d{14}", part):
+                try:
+                    return datetime.strptime(
+                        part,
+                        "%Y%m%d%H%M%S",
+                    )
+                except ValueError:
+                    pass
+        # Existing RC format
+        if len(parts) < 4:
+            return None
+
+        try:
+            date_part = parts[2].strip()
+            time_part = parts[3].strip()
+
+            dt_string = f"20{date_part}{time_part}"
+
+            return datetime.strptime(
+                dt_string,
+                "%Y%m%d%H%M%S",
+            )
+
+        except Exception:
+            return None
 
     def _derive_measurement_datetime_from_filename(
         self, file_name: str
@@ -314,6 +372,13 @@ class TransformStep:
                                 f"[LOG_ID:{log_id}] TRANSFORM STEP: DataFrame head (20 rows):\n{df2.head(20).to_string()}",
                                 **context,
                             )
+                            try:
+                                LOGGER.info(
+                                    f"[LOG_ID:{log_id}] SAMPLE ROW 8 = {df.iloc[8].tolist()}",
+                                    **context,
+                                )
+                            except Exception:
+                                pass
                             return df2
                         except Exception:
                             # Fall back to the original df if autodetect fails
@@ -683,6 +748,154 @@ class TransformStep:
             **context,
         )
 
+        return rows
+
+    def _parse_kts7898(
+        self,
+        file_path: Path,
+        part_config: dict,
+        machine_config: dict,
+        context: dict,
+        log_id: int,
+    ) -> List[Dict[str, Any]]:
+        vehicle_model = part_config.get("vehicle_model")
+        parts_code = part_config.get("parts_code")
+        op_no = part_config.get("op_no")
+        vpo_code = part_config.get("vpo_code")
+        side = part_config.get("side")
+
+        parser = machine_config.get("parser", {})
+
+        excluded_evaluation_items = set(parser.get("excluded_evaluation_items", []))
+        rows = []
+        #
+        # Always keep the LAST "----------" line encountered.
+        # Example:
+        #
+        # ----------[基準] 両ｾﾝﾀ/1CW基準面/Rrﾌﾗﾝｼﾞ端面
+        # ---------- op60 #1P～#4P ﾋﾟﾝ位置度 ※両ｾﾝﾀ-1CW基準
+        #
+        # Then 6021 inherits:
+        # op60 #1P～#4P ﾋﾟﾝ位置度 ※両ｾﾝﾀ-1CW基準
+        #
+        current_reference_position = None
+        with open(
+            file_path,
+            "r",
+            encoding="cp932",
+            errors="replace",
+        ) as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                cols = [c.strip() for c in line.split(",")]
+                # Handle reference-position header rows
+                if cols and cols[0].startswith("----------"):
+                    header_text = "".join(c for c in cols if c)
+                    header_text = header_text.replace("----------", "").strip()
+                    if header_text.lower().startswith("op"):
+                        current_reference_position = header_text
+                        LOGGER.info(
+                            f"[LOG_ID:{log_id}] KTS-7898 REFERENCE POSITION="
+                            f"'{current_reference_position}'",
+                            **context,
+                        )
+                    continue
+
+                cols = [c.strip() for c in line.split(",")]
+                # Business rule:
+                # Measurement rows MUST have H column
+                if len(cols) < 8:
+                    continue
+                try:
+                    evaluation_item1 = cols[1].strip()
+                    measure_item = cols[2].strip()
+                    if evaluation_item1 in excluded_evaluation_items:
+                        continue
+                    specification = cols[4].strip()
+                    upper_limit = cols[5].strip()
+                    if (
+                        upper_limit == "9.9999"
+                        or upper_limit == "9.9990"
+                        or upper_limit == "9.999"
+                    ):
+                        upper_limit = "-"
+                    lower_limit = cols[6].strip()
+                    if (
+                        lower_limit == "-9.9999"
+                        or lower_limit == "-9.9990"
+                        or lower_limit == "-9.999"
+                    ):
+                        lower_limit = "-"
+                    measure_value = cols[7].strip()
+                except IndexError:
+                    continue
+
+                try:
+                    measure_value_float = float(measure_value)
+                except (TypeError, ValueError):
+                    continue
+                LOGGER.info(
+                    f"[LOG_ID:{log_id}] ROW "
+                    f"eval='{evaluation_item1}' "
+                    f"item='{measure_item}' "
+                    f"ref='{current_reference_position}'",
+                    **context,
+                )
+                if not current_reference_position:
+                    raise ValueError(
+                        f"KTS-7898 reference reference position missing. "
+                        f"eval={evaluation_item1} item={measure_item}"
+                    )
+                measure_point = None
+                # 1. Number immediately after #
+                match = re.search(r"#(\d+)", evaluation_item1)
+                if match:
+                    measure_point = match.group(1)
+                # 2. Number immediately before 穴
+                if not measure_point:
+                    match = re.search(r"(\d+)穴", evaluation_item1)
+                    if match:
+                        measure_point = match.group(1)
+                # 3. Number immediately before °
+                if not measure_point:
+                    match = re.search(r"(\d+°)", evaluation_item1)
+                    if match:
+                        measure_point = match.group(1)
+                # 4. Any number outside brackets
+                if not measure_point:
+                    text_without_brackets = re.sub(
+                        r"\([^)]*\)|\[[^\]]*\]",
+                        "",
+                        evaluation_item1,
+                    )
+                    match = re.search(r"(\d+)", text_without_brackets)
+                    if match:
+                        measure_point = match.group(1)
+
+                rows.append(
+                    {
+                        "vehicle_model": vehicle_model,
+                        "parts_code": parts_code,
+                        "op_no": op_no,
+                        "vpo_code": vpo_code,
+                        "side": side,
+                        "evaluation_item1": evaluation_item1,
+                        "measure_item": measure_item,
+                        "measure_point": measure_point,
+                        "reference_position": current_reference_position,
+                        "measure_position": None,
+                        "specification": specification,
+                        "upper_limit": upper_limit,
+                        "lower_limit": lower_limit,
+                        "measure_value": measure_value_float,
+                    }
+                )
+        LOGGER.info(
+            f"[LOG_ID:{log_id}] KTS-7898 parser created {len(rows)} rows.",
+            **context,
+        )
         return rows
 
     def _get_optional_value(self, row: pd.Series, key: str):

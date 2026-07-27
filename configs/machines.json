@@ -61,6 +61,42 @@
       "ignore_file_prefixes": [
         "E-NR-BLOCK"
       ]
+    },
+    {
+      "machine_id": "KTS-7898",
+      "description": "Mitutoyo CMM - Produces 3次元 CR measurement files.",
+      "source_path": "C:\\FS3\\CMM\\Mitutoyo\\KTS-7898\\CSV",
+      "parser": {
+        "file_type": "csv",
+        "encoding": "shift_jis",
+        "header_row": null,
+        "data_start_row": 0,
+        "evaluation_item1_column_idx": 1,
+        "measure_item_column_idx": 2,
+        "specification_column_idx": 4,
+        "upper_limit_column_idx": 5,
+        "lower_limit_column_idx": 6,
+        "value_column_idx": 7,
+        "excel_sheet_index": -1,
+        "excluded_evaluation_items": [
+          "Lower_SP",
+          "Upper_SP",
+          "Upper Sphere",
+          "上下球間距離"
+        ],
+        "layout_overrides": []
+      },
+      "pipeline_type": "3D_CR",
+      "version": "07898000",
+      "poll_interval_sec": 5,
+      "stable_wait_sec": 2,
+      "stable_required_count": 3,
+      "max_workers": 2,
+      "enabled": true,
+      "ignore_file_prefixes": [
+        "[0.校正]RC_GT3用",
+        "[AZ]"
+      ]
     }
   ],
   "conversion_watch": {
