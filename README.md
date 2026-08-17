@@ -385,7 +385,6 @@ At startup, `_cleanup_stale_tasks()` resets interrupted `PROCESSING` records to 
 | `fs3.pre_f_3d_bl` | Staging data for 3D BL measurements |
 | `fs3.pre_m_cmm` | Measurement master definitions |
 | `fs3.pre_t_cmm` | Imported measurement transaction values |
-| `fs3.pre_w_3d_hd` | HD conversion-mapping staging data |
 
 ## Dead Letter Queue and Retry
 
