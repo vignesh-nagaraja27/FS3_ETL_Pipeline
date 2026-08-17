@@ -11,15 +11,21 @@ The Dispatcher is the 'Classifier' of this system. Its job is narrow and critica
 
 The dispatcher never processes data itself — it only classifies and routes.
 3D file classification comes from the database (fs3.pre_m_file_pattern) via
-FilePatternRepository. Checksheet classification uses 'configs/parts_checksheet.json'.
+FilePatternRepository. Checksheet classification uses ConfigLoader regex matching.
 """
 
 from pathlib import Path
 from typing import Optional, Tuple
 
 from config_loader import ConfigLoader
+from pipelines.pipeline_3d import Pipeline3D
 from repositories.file_pattern_repository import FilePatternRepository
 from utils.logger import LOGGER
+
+try:
+    from pipelines.pipeline_checksheet import PipelineChecksheet
+except ImportError:  # pragma: no cover - compatibility with class naming in older installs
+    from pipelines.pipeline_checksheet import ChecksheetPipeline as PipelineChecksheet
 
 
 # Identifies the pipeline type based on dispatch result
@@ -47,6 +53,31 @@ class Dispatcher:
         self._config = config
         self._file_pattern_repo = FilePatternRepository()
 
+    def dispatch(self, pipeline_type: str, **kwargs):
+        """Instantiate the pipeline for the selected pipeline type."""
+        destination_root = (
+            kwargs.get("destination_root")
+            or self._config.get_destination_root()
+        )
+
+        if pipeline_type == PIPELINE_3D_HD:
+            LOGGER.info(f"[PIPELINE SELECTED] {pipeline_type}",pipeline_type="3D")
+            return Pipeline3D(destination_root=destination_root)
+
+        if pipeline_type == PIPELINE_3D_BL:
+            LOGGER.info(f"[PIPELINE SELECTED] {pipeline_type}",pipeline_type="3D")
+            return Pipeline3D(destination_root=destination_root)
+
+        if pipeline_type == PIPELINE_3D_CR:
+            LOGGER.info(f"[PIPELINE SELECTED] {pipeline_type}",pipeline_type="3D")
+            return Pipeline3D(destination_root=destination_root)
+
+        if pipeline_type == PIPELINE_CHECKSHEET:
+            LOGGER.info(f"[PIPELINE SELECTED] {pipeline_type}",pipeline_type="CHECKSHEET")
+            return PipelineChecksheet(destination_root=destination_root)
+
+        raise ValueError(f"Unsupported pipeline type: {pipeline_type}")
+
     def classify(self, file_path: Path) -> Tuple[str, Optional[dict]]:
         """
         The main classification method. Given a file path, returns:
@@ -68,36 +99,55 @@ class Dispatcher:
         """
         filename = file_path.name
 
+        # Checksheet filenames are more specific and must take precedence over 3D rules.
+        match_cs = self._config.match_checksheet_part(filename)
+        if match_cs:
+            pipeline_type = PIPELINE_CHECKSHEET
+            LOGGER.info(
+                f"[DEBUG DISPATCH] CHECKSHEET MATCH filename={filename}",pipeline_type="CHECKSHEET"
+            )
+            LOGGER.info(
+                f"Classified as '{pipeline_type}': {filename}",
+                model=match_cs.get("vehicle_model"),
+                part=match_cs.get("parts_code"),
+                op=match_cs.get("op_no"),pipeline_type="CHECKSHEET"
+            )
+            return pipeline_type, match_cs
+
         # Try matching against 3D rules from database (fs3.pre_m_file_pattern)
         match_3d = self._file_pattern_repo.find_match(filename)
         if match_3d is not None:
             pipeline_type = match_3d.get("machine_type", PIPELINE_3D_HD)
+            LOGGER.info(
+                f"[DEBUG DISPATCH] 3D MATCH "
+                f"filename={filename} "
+                f"file_pattern={match_3d.get('file_pattern')} "
+                f"machine_type={pipeline_type}",pipeline_type="3D"
+            )
             LOGGER.info(
                 f"Classified '{filename}' "
                 f"using pattern '{match_3d.get('file_pattern')}' "
                 f"as '{pipeline_type}'",
                 model=match_3d.get("vehicle_model"),
                 part=match_3d.get("parts_code"),
-                op=match_3d.get("op_no"),
+                op=match_3d.get("op_no"),pipeline_type="3D"
             )
             return pipeline_type, match_3d
-
-        # Try matching against Checksheet rules
-        match_cs = self._config.match_checksheet_part(filename)
-        if match_cs:
-            pipeline_type = PIPELINE_CHECKSHEET
-            LOGGER.info(
-                f"Classified as '{pipeline_type}': {filename}",
-                model=match_cs.get("vehicle_model"),
-                part=match_cs.get("parts_code"),
-                op=match_cs.get("op_no"),
-            )
-            return pipeline_type, match_cs
 
         # No match found — quarantine the file and log clearly
         LOGGER.warning(
             f"[UNCLASSIFIED] No matching rule found for file '{filename}'. "
             f"Check 'fs3.pre_m_file_pattern' for 3D rules or "
-            f"'configs/parts_checksheet.json' for checksheet rules."
+            f"filename regex rules for checksheet files.",pipeline_type="SYSTEM",
         )
         return PIPELINE_UNKNOWN, None
+
+
+__all__ = [
+    "Dispatcher",
+    "PIPELINE_3D_BL",
+    "PIPELINE_3D_CR",
+    "PIPELINE_3D_HD",
+    "PIPELINE_CHECKSHEET",
+    "PIPELINE_UNKNOWN",
+]

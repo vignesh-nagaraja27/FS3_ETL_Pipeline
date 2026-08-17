@@ -21,6 +21,7 @@ from utils.logger import LOGGER
 
 
 class PipelineStatus(str, Enum):
+    STALE = "STALE"
     PENDING = "PENDING"
     PROCESSING = "PROCESSING"
     COMPLETED = "COMPLETED"
@@ -62,12 +63,15 @@ class StatusManager:
         parts_code: Optional[str] = None,
         op_no: Optional[str] = None,
         pid: Optional[int] = None,
+        watch_id: Optional[str] = None,
     ) -> Optional[int]:
+        """Register a pending pipeline execution with optional watcher identity."""
         sql = f"""
             INSERT INTO {self.TABLE_LOG}
-                (file_name, file_size, machine_id, vehicle_model, parts_code, op_no, status, pid)
-            VALUES (%s, %s, %s, %s, %s, %s, 'PENDING', %s)
-            ON CONFLICT (file_name) WHERE (status IN ('PENDING', 'PROCESSING'))
+                (file_name, file_size, machine_id, vehicle_model, parts_code,
+                 op_no, status, pid, watch_id)
+            VALUES (%s, %s, %s, %s, %s, %s, 'PENDING', %s, %s)
+            ON CONFLICT (watch_id,file_name) WHERE (status IN ('PENDING', 'PROCESSING'))
             DO NOTHING
             RETURNING id;
         """
@@ -84,6 +88,7 @@ class StatusManager:
                             parts_code,
                             op_no,
                             pid,
+                            watch_id,
                         ),
                     )
                     result = cur.fetchone()
@@ -171,9 +176,11 @@ class StatusManager:
         part: Optional[str] = None,
         op: Optional[str] = None,
     ):
+        # Finalize the pipeline log: status COMPLETED and mark current_step=COMPLETED
         self._update_log(
             log_id,
             PipelineStatus.COMPLETED,
+            current_step="COMPLETED",
             completed_at=datetime.utcnow(),
             compute_duration=True,
         )

@@ -36,9 +36,9 @@ def main():
     System bootstrap sequence:
       1. Load configs → 2. Init DB pool → 3. Start orchestrator
     """
-    LOGGER.info("=" * 60)
-    LOGGER.info("FS3 ETL Data Pipeline — Starting Up")
-    LOGGER.info("=" * 60)
+    LOGGER.info("=" * 60,pipeline_type="SYSTEM")
+    LOGGER.info("FS3 ETL Data Pipeline — Starting Up",pipeline_type="SYSTEM")
+    LOGGER.info("=" * 60,pipeline_type="SYSTEM")
 
     # ── STEP 1: Load Configuration ───────────────────────────────────────────
     try:
@@ -46,17 +46,24 @@ def main():
         LOGGER.info(
             f"Configuration loaded. "
             f"{len(config.get_watch_directories())} machine(s) configured, "
-            f"{len(config.parts_3d)} 3D part rule(s) loaded."
+            f"{len(config.parts_3d)} 3D part rule(s) loaded.",pipeline_type="SYSTEM"
         )
+        checksheet_path = Path(__file__).resolve().parent / "configs" / "checksheet.json"
+        if checksheet_path.exists():
+            LOGGER.info(
+                f"Number of checksheet watch directories: "
+                f"{len(config.get_checksheet_watch_directories())}",
+                pipeline_type="SYSTEM"
+            )
     except FileNotFoundError as e:
         LOGGER.critical(
             f"STARTUP FAILED: A required config file is missing. {e} "
-            f"Check the 'ETL_Pipeline/configs/' folder."
+            f"Check the 'ETL_Pipeline/configs/' folder.",pipeline_type="SYSTEM"
         )
         sys.exit(1)
     except Exception as e:
         LOGGER.critical(
-            f"STARTUP FAILED: Error loading configuration: {e}", exc_info=True
+            f"STARTUP FAILED: Error loading configuration: {e}",pipeline_type="SYSTEM" ,exc_info=True
         )
         sys.exit(1)
 
@@ -75,18 +82,18 @@ def main():
             f"Database connection pool initialized. "
             f"Min connections: {pool_config.get('min_conn', 2)}, "
             f"Max connections: {pool_config.get('max_conn', 15)}."
-            f"Debug Pool Stats: True"
+            f"Debug Pool Stats: True",pipeline_type="SYSTEM"
         )
     except KeyError:
         LOGGER.critical(
             "STARTUP FAILED: 'db_config.json' is missing the 'db' key. "
-            "Please fill in your database credentials in 'configs/db_config.json'."
+            "Please fill in your database credentials in 'configs/db_config.json'.",pipeline_type="SYSTEM"
         )
         sys.exit(1)
     except Exception as e:
         LOGGER.critical(
             f"STARTUP FAILED: Could not connect to the database. "
-            f"Verify 'configs/db_config.json' credentials. Error: {e}",
+            f"Verify 'configs/db_config.json' credentials. Error: {e}",pipeline_type="SYSTEM",
             exc_info=True,
         )
         sys.exit(1)
@@ -96,7 +103,7 @@ def main():
         runner = JobRunner(config=config)
         runner.start()  # Blocks here until Ctrl+C
     except Exception as e:
-        LOGGER.critical(f"FATAL: Job Runner crashed unexpectedly: {e}", exc_info=True)
+        LOGGER.critical(f"FATAL: Job Runner crashed unexpectedly: {e}", pipeline_type="SYSTEM",exc_info=True)
         sys.exit(1)
 
 

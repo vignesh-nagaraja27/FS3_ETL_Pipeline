@@ -55,7 +55,7 @@ class Pipeline3D:
         op_no = str(part_config.get("op_no") or "UNKNOWN")
 
         context = dict(
-            machine=machine_id, model=vehicle_model, part=parts_code, op=op_no
+            machine=machine_id, model=vehicle_model, part=parts_code, op=op_no,pipeline_type=pipeline_type,
         )
 
         processing_path: Optional[Path] = None

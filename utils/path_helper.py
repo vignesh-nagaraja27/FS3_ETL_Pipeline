@@ -1,62 +1,47 @@
 # -*- coding: utf-8 -*-
-"""
-Path Helper
------------
-Centralized helper for building the per-operation destination folder structure
-used by the ETL pipeline.
+"""Centralized path generation for CMM and Checksheet ETL pipelines.
 
-Folder layout produced by this helper:
+CMM layout::
 
-    <destination_root>/<MC_NO>/<VEHICLE_MODEL>/<PARTS_CODE>/<OP_NO>/_processing
-    <destination_root>/<MC_NO>/<VEHICLE_MODEL>/<PARTS_CODE>/<OP_NO>/_completed
-    <destination_root>/<MC_NO>/<VEHICLE_MODEL>/<PARTS_CODE>/<OP_NO>/_NG
+    <root>/<mc_no>/<model>/<part>/<op>/_processing
+    <root>/<mc_no>/<model>/<part>/<op>/_completed
+    <root>/<mc_no>/<model>/<part>/<op>/_NG
 
-Example:
-    C:/FS3/DataCollect/KTSF-0453/RC/HD-RH/OP010/_processing
-    C:/FS3/DataCollect/KTSF-0453/RC/HD-RH/OP010/_completed
-    C:/FS3/DataCollect/KTSF-0453/RC/HD-RH/OP010/_NG
+Checksheet layout::
 
-All three subdirectories are created on demand (parents=True, exist_ok=True)
-so callers never need to mkdir before writing.
+    <root>/<model>/<part>/<op>/_archive
+    <root>/<model>/<part>/<op>/_ng
+    <root>/<model>/<part>/<op>/_replay
 """
 
 from pathlib import Path
 from typing import Tuple
 
 
-# Subfolder names — kept as constants so the rest of the codebase can reference
-# them without hardcoding strings.
+# Existing CMM folder names. Their values and casing are compatibility-sensitive.
 PROCESSING_DIR_NAME = "_processing"
 COMPLETED_DIR_NAME = "_completed"
 NG_DIR_NAME = "_NG"
 
+# Checksheet-only folder names.
+ARCHIVE_DIR_NAME = "_archive"
+CHECKSHEET_NG_DIR_NAME = "_ng"
+REPLAY_DIR_NAME = "_replay"
+
 
 def _sanitize_segment(value: str, fallback: str = "UNKNOWN") -> str:
-    """
-    Sanitize a single path segment so it cannot break the folder structure.
-
-    Rules:
-      - Strip whitespace.
-      - Replace any character that is illegal in Windows file paths
-        (< > : " / \\ | ? *) with '_'.
-      - If the result is empty, use the fallback.
-
-    Args:
-        value (str): The raw segment (e.g. machine_id, vehicle_model).
-        fallback (str): Used when the sanitized value is empty.
-
-    Returns:
-        str: A safe, non-empty path segment.
-    """
+    """Return a safe, non-empty Windows-compatible path segment."""
     if value is None:
         return fallback
+
     cleaned = str(value).strip()
     if not cleaned:
         return fallback
-    # Replace illegal Windows path characters with underscore
+
     illegal = '<>:"/\\|?*'
-    for ch in illegal:
-        cleaned = cleaned.replace(ch, "_")
+    for character in illegal:
+        cleaned = cleaned.replace(character, "_")
+
     return cleaned or fallback
 
 
@@ -68,24 +53,7 @@ def get_working_paths(
     op_no: str,
     create: bool = True,
 ) -> Tuple[Path, Path, Path]:
-    """
-    Build the three per-operation working folders for a single pipeline run.
-
-    Args:
-        destination_root (str): Root folder for all output (e.g. 'C:/FS3/DataCollect').
-        mc_no (str): Machine identifier (e.g. 'KTSF-0453').
-        vehicle_model (str): Vehicle model code (e.g. 'RC').
-        parts_code (str): Parts code (e.g. 'HD-RH').
-        op_no (str): Operation number (e.g. 'OP010').
-        create (bool): If True (default), create all three folders on disk.
-
-    Returns:
-        Tuple[Path, Path, Path]: (processing_path, completed_path, ng_path)
-
-    Raises:
-        OSError: If 'create=True' and the OS refuses to create the folders
-                 (e.g. permission denied, invalid root path).
-    """
+    """Build the existing CMM processing, completed, and NG directories."""
     root = Path(destination_root)
     op_root = (
         root
@@ -107,5 +75,50 @@ def get_working_paths(
     return processing_path, completed_path, ng_path
 
 
-# Backward-compatible alias.
+def get_checksheet_paths(
+    destination_root: str,
+    vehicle_model: str,
+    parts_code: str,
+    op_no: str,
+    create: bool = True,
+) -> Tuple[Path, Path, Path]:
+    """Build the Checksheet archive, NG, and replay directories."""
+    root = Path(destination_root)
+    op_root = (
+        root
+        / _sanitize_segment(vehicle_model)
+        / _sanitize_segment(parts_code)
+        / _sanitize_segment(op_no)
+    )
+
+    archive_path = op_root / ARCHIVE_DIR_NAME
+    ng_path = op_root / CHECKSHEET_NG_DIR_NAME
+    replay_path = op_root / REPLAY_DIR_NAME
+
+    if create:
+        archive_path.mkdir(parents=True, exist_ok=True)
+        ng_path.mkdir(parents=True, exist_ok=True)
+        replay_path.mkdir(parents=True, exist_ok=True)
+
+    return archive_path, ng_path, replay_path
+
+
+# Backward-compatible CMM alias.
 build_working_paths = get_working_paths
+
+# Checksheet alias.
+build_checksheet_paths = get_checksheet_paths
+
+
+__all__ = [
+    "ARCHIVE_DIR_NAME",
+    "CHECKSHEET_NG_DIR_NAME",
+    "COMPLETED_DIR_NAME",
+    "NG_DIR_NAME",
+    "PROCESSING_DIR_NAME",
+    "REPLAY_DIR_NAME",
+    "build_checksheet_paths",
+    "build_working_paths",
+    "get_checksheet_paths",
+    "get_working_paths",
+]

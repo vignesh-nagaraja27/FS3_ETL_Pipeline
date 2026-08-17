@@ -7,6 +7,9 @@ Manages safe, thread-safe database connections using a Singleton connection pool
 
 Utilizes Python's context manager pattern to ensure that every connection borrowed from
 the pool is strictly returned, even in the event of unexpected exceptions.
+
+All connection pool and database lifecycle events are explicitly logged to
+the system master log via pipeline_type="SYSTEM".
 """
 
 import time
@@ -83,10 +86,14 @@ class DatabaseHandler:
                 self._initialized = True
                 LOGGER.info(
                     "Database Connection Pool successfully initialized "
-                    f"(min={min_conn}, max={max_conn})."
+                    f"(min={min_conn}, max={max_conn}).",
+                    pipeline_type="SYSTEM",
                 )
             except Exception as e:
-                LOGGER.error(f"Failed to initialize ThreadedConnectionPool: {e}")
+                LOGGER.error(
+                    f"Failed to initialize ThreadedConnectionPool: {e}",exc_info=True,
+                    pipeline_type="SYSTEM",
+                )
                 raise
 
     def get_connection(self, max_retries: int = 5, base_delay: float = 0.1):
@@ -136,7 +143,8 @@ class DatabaseHandler:
         available = max(0, self._max_conn - in_use)
         LOGGER.info(
             f"[DB POOL] {label} | thread={threading.current_thread().name} "
-            f"in_use={in_use} available~={available} max={self._max_conn}"
+            f"in_use={in_use} available~={available} max={self._max_conn}",
+            pipeline_type="SYSTEM",
         )
 
     def close_all(self):
@@ -145,9 +153,15 @@ class DatabaseHandler:
             if self._pool:
                 try:
                     self._pool.closeall()
-                    LOGGER.info("All connection pool sessions closed successfully.")
+                    LOGGER.info(
+                        "All connection pool sessions closed successfully.",
+                        pipeline_type="SYSTEM",
+                    )
                 except Exception as e:
-                    LOGGER.error(f"Error closing the connection pool: {e}")
+                    LOGGER.error(
+                        f"Error closing the connection pool: {e}",
+                        pipeline_type="SYSTEM",
+                    )
                 finally:
                     self._pool = None
                     self._initialized = False
@@ -180,7 +194,10 @@ class ConnectionContext:
 
     def __enter__(self):
         self.handler._log_pool_stats("BEFORE GET")
-        LOGGER.info(f"DB GETCONN REQUEST THREAD={threading.current_thread().name}")
+        LOGGER.info(
+            f"DB GETCONN REQUEST THREAD={threading.current_thread().name}",
+            pipeline_type="SYSTEM",
+        )
 
         last_error = None
         for attempt in range(self.max_retries):
@@ -191,7 +208,8 @@ class ConnectionContext:
                 LOGGER.info(
                     f"DB GETCONN ACQUIRED "
                     f"THREAD={threading.current_thread().name} "
-                    f"WAIT={elapsed:.3f}s"
+                    f"WAIT={elapsed:.3f}s",
+                    pipeline_type="SYSTEM",
                 )
                 break
             except PoolError as e:
@@ -201,13 +219,15 @@ class ConnectionContext:
                 LOGGER.warning(
                     f"DB pool exhausted (attempt {attempt + 1}/{self.max_retries}), "
                     f"retrying in {delay:.2f}s | thread="
-                    f"{threading.current_thread().name}"
+                    f"{threading.current_thread().name}",
+                    pipeline_type="SYSTEM",
                 )
                 time.sleep(delay)
         else:
             LOGGER.error(
                 f"DB pool exhausted after {self.max_retries} retries | "
-                f"thread={threading.current_thread().name}"
+                f"thread={threading.current_thread().name}",
+                pipeline_type="SYSTEM",
             )
             raise PoolError(
                 f"Connection pool exhausted after {self.max_retries} retries"
@@ -218,7 +238,10 @@ class ConnectionContext:
         try:
             self.conn.rollback()
         except Exception as e:
-            LOGGER.warning(f"Could not reset connection state on borrow: {e}")
+            LOGGER.warning(
+                f"Could not reset connection state on borrow: {e}",
+                pipeline_type="SYSTEM",
+            )
         self.handler._log_pool_stats("AFTER GET")
         return self.conn
 
@@ -232,15 +255,24 @@ class ConnectionContext:
         try:
             if exc_type is not None:
                 self.conn.rollback()
-                LOGGER.warning("Database transaction rolled back due to error.")
+                LOGGER.warning(
+                    "Database transaction rolled back due to error.",
+                    pipeline_type="SYSTEM",
+                )
             else:
                 self.conn.commit()
         except (OperationalError, InterfaceError) as e:
             # Connection itself is likely dead -> mark for discard.
             broken = True
-            LOGGER.error(f"Connection error during commit/rollback: {e}")
+            LOGGER.error(
+                f"Connection error during commit/rollback: {e}",
+                pipeline_type="SYSTEM",
+            )
         except Exception as e:
-            LOGGER.error(f"Error handling transaction cleanup: {e}")
+            LOGGER.error(
+                f"Error handling transaction cleanup: {e}",
+                pipeline_type="SYSTEM",
+            )
 
         # 2) ALWAYS return the connection to the pool (discard if broken).
         #    Wrapped so a putconn failure never masks the original exception.
@@ -248,9 +280,15 @@ class ConnectionContext:
             self.handler._log_pool_stats("BEFORE RETURN")
             self.pool.putconn(self.conn, close=broken)
             if broken:
-                LOGGER.warning("Broken connection discarded and replaced in the pool.")
+                LOGGER.warning(
+                    "Broken connection discarded and replaced in the pool.",
+                    pipeline_type="SYSTEM",
+                )
         except Exception as e:
-            LOGGER.error(f"Error returning connection to pool: {e}")
+            LOGGER.error(
+                f"Error returning connection to pool: {e}",
+                pipeline_type="SYSTEM",
+            )
         finally:
             self.conn = None
             self.handler._decr_in_use()
