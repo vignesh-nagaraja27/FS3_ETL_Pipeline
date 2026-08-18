@@ -4,7 +4,7 @@
 from __future__ import annotations
 import unicodedata
 from datetime import date, datetime
-from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence, Set, Union
+from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence, Set, Tuple, Union
 from utils.logger import LOGGER
 from psycopg2 import sql
 
@@ -152,6 +152,8 @@ class MeasurementRepository:
         if connection is None:
             raise ValueError("MeasurementRepository requires a live database connection")
         self.conn = connection
+        self._last_column_map: Optional[Dict[str, str]] = None
+        self._last_vpo_code: Optional[str] = None
 
     @staticmethod
     def _normalize_text(value: Any) -> str:
@@ -511,21 +513,6 @@ class MeasurementRepository:
     # =========================================================================
     # ARCHITECTURAL DESIGN: Generic Key-Value Master Definition Change Log
     # =========================================================================
-    # 1. Scalability via One Row Per Field Change:
-    #    Replacing hardcoded change log columns (e.g., old_spec/new_spec, old_upper/new_upper)
-    #    with a generic key-value change model (change_key, old_value, new_value) enables
-    #    auditing any current or future master definition field without schema migrations.
-    #
-    # 2. Exclusion of Transaction Measurement Data:
-    #    Transaction values (data_001 through data_500) represent high-volume runtime
-    #    production measurements rather than master engineering specifications. Auditing
-    #    transaction measurements in this table would cause catastrophic log bloat.
-    #    Only master definitions in fs3.pre_m_measurement are audited here.
-    #
-    # 3. End-to-End Audit Traceability:
-    #    Every field change is linked to watch_id, file_version_id, file_name, file_hash,
-    #    vpo_code, and pi_no, providing complete lineage back to the original source workbook.
-    # =========================================================================
 
     def sync_masters(
         self,
@@ -537,12 +524,16 @@ class MeasurementRepository:
         file_name: Optional[str] = None,
         file_hash: Optional[str] = None,
         insert_id: str = "Vig",
-    ) -> None:
-        """Synchronize master slots so position N always maps to PI_NO N.
+    ) -> Dict[str, str]:
+        """Synchronize master records using stable business identity resolution.
 
         Performs field-by-field diff comparison against fs3.pre_m_measurement before
         upserting, generating generic key-value audit log entries in
         fs3.pre_cs_measurement_change_log for every changed master field.
+
+        Returns the resolved workbook-column -> PI_NO data-column mapping so the
+        caller can explicitly pass it to sync_transactions(), including when that
+        method runs on a different repository instance.
         """
         if not isinstance(master_records, list):
             raise TypeError("master_records must be a list of master dictionaries")
@@ -602,25 +593,97 @@ class MeasurementRepository:
                 sql.SQL(", ").join(sql.Identifier(col) for col in self._AUDITABLE_MASTER_FIELDS)
             )
             cur.execute(fetch_sql, (version_value, vpo_code))
-            existing_rows = {row[0]: row for row in cur.fetchall()}
+            existing_db_tuples = cur.fetchall()
+
+            # Map pi_no -> dict of auditable field values
+            existing_rows: Dict[int, Dict[str, Any]] = {}
+            for row in existing_db_tuples:
+                pi = int(row[0])
+                existing_rows[pi] = dict(zip(self._AUDITABLE_MASTER_FIELDS, row[1:]))
 
             audit_logs: List[Dict[str, Any]] = []
 
-            # Step 2: Compare incoming master records against existing DB rows
-            for pi_no, master_record in enumerate(master_records, start=1):
+            # Step 2: Resolve PI_NO for each incoming record via business identity
+            claimed_db_pi_nos: Set[int] = set()
+            used_pi_nos: Set[int] = set(existing_rows.keys())
+            resolved_records: List[Tuple[int, Dict[str, Any]]] = []
+            column_map: Dict[str, str] = {}
+
+            for idx, master_record in enumerate(master_records, start=1):
                 if not isinstance(master_record, dict):
                     raise TypeError("every master_records entry must be a dictionary")
-                expected_data_column = f"data_{pi_no:03d}"
-                if master_record.get("data_column") != expected_data_column:
-                    raise ValueError(
-                        f"master position {pi_no} must map to {expected_data_column}"
-                    )
                 record_vpo_code = self._normalize_text(master_record.get("vpo_code"))
                 if record_vpo_code != vpo_code:
                     raise ValueError("all master_records must use the same vpo_code")
                 if master_record.get("version") != version_value:
                     raise ValueError("all master_records must use version '00000000'")
 
+                orig_data_col = master_record.get("data_column") or f"data_{idx:03d}"
+                pi_no: Optional[int] = None
+
+                # STEP 1: Search DB via business-key resolver (_pi_search)
+                existing_pi = self._pi_search(cur, master_record, version_value)
+                if existing_pi is not None and existing_pi not in claimed_db_pi_nos:
+                    pi_no = existing_pi
+
+                # STEP 2: Search unclaimed DB master rows matching:
+                # op_name, Inspection_no, measure_item, measure_point, measure_direction, measure_depth
+                if pi_no is None:
+                    rec_op_name = self._normalize_text(master_record.get("op_name"))
+                    rec_inspection_no = self._normalize_text(master_record.get("Inspection_no"))
+                    rec_item = self._normalize_text(master_record.get("measure_item"))
+                    rec_point = self._normalize_text(master_record.get("measure_point"))
+                    rec_dir = self._normalize_text(master_record.get("measure_direction"))
+                    rec_depth = self._normalize_text(master_record.get("measure_depth"))
+
+                    for ex_pi, ex_fields in existing_rows.items():
+                        if ex_pi in claimed_db_pi_nos:
+                            continue
+
+                        ex_op_name = self._normalize_text(ex_fields.get("op_name"))
+                        ex_inspection_no = self._normalize_text(ex_fields.get("Inspection_no"))
+                        ex_item = self._normalize_text(ex_fields.get("measure_item"))
+                        ex_point = self._normalize_text(ex_fields.get("measure_point"))
+                        ex_dir = self._normalize_text(ex_fields.get("measure_direction"))
+                        ex_depth = self._normalize_text(ex_fields.get("measure_depth"))
+
+                        if (
+                            rec_op_name == ex_op_name
+                            and rec_inspection_no == ex_inspection_no
+                            and rec_item == ex_item
+                            and rec_point == ex_point
+                            and rec_dir == ex_dir
+                            and rec_depth == ex_depth
+                        ):
+                            pi_no = ex_pi
+                            break
+
+                # STEP 3: Allocate a new PI_NO if no existing definition matches
+                if pi_no is None:
+                    next_pi = max(used_pi_nos, default=0) + 1
+                    if next_pi > self.MAX_PI_NO:
+                        raise ValueError(f"PI_NO exceeds supported maximum {self.MAX_PI_NO}")
+                    pi_no = next_pi
+
+                claimed_db_pi_nos.add(pi_no)
+                used_pi_nos.add(pi_no)
+
+                resolved_data_col = f"data_{pi_no:03d}"
+                master_record["pi_no"] = pi_no
+                master_record["data_column"] = resolved_data_col
+                master_record["orig_data_column"] = orig_data_col
+                column_map[orig_data_col] = resolved_data_col
+
+                resolved_records.append((pi_no, master_record))
+
+            # Return the resolved column mapping explicitly to the caller.
+            # Repository instance state is not required for transaction remapping.
+            # Keep the legacy state only as a backward-compatible fallback.
+            self._last_column_map = column_map
+            self._last_vpo_code = vpo_code
+
+            # Step 3: Compare resolved master records against existing DB rows for audit logging
+            for pi_no, master_record in resolved_records:
                 values = self._prepare_master_values(
                     master_record,
                     version=version_value,
@@ -649,13 +712,13 @@ class MeasurementRepository:
                             })
                 else:
                     # Existing PI_NO slot -> Field-by-field comparison
-                    db_row_values = existing_rows[pi_no][1:]  # skip pi_no
-                    for idx, field in enumerate(self._AUDITABLE_MASTER_FIELDS):
+                    ex_fields = existing_rows[pi_no]
+                    for field in self._AUDITABLE_MASTER_FIELDS:
                         # Note: sync_masters excludes limits from conflict update
                         if field in {"upper_limit", "lower_limit"}:
                             continue
 
-                        old_val = db_row_values[idx]
+                        old_val = ex_fields.get(field)
                         new_val = values.get(field)
 
                         old_str = self._normalize_text(old_val)
@@ -682,31 +745,31 @@ class MeasurementRepository:
                                 "insert_id": insert_id,
                             })
 
-            # Step 3: Audit deleted master slots (slots beyond length of incoming records)
-            for old_pi_no, db_row in existing_rows.items():
-                if old_pi_no > len(master_records):
-                    audit_logs.append({
-                        "version": version_value,
-                        "watch_id": watch_id,
-                        "file_version_id": file_version_id,
-                        "file_name": file_name,
-                        "file_hash": file_hash,
-                        "vpo_code": vpo_code,
-                        "pi_no": old_pi_no,
-                        "change_key": "master_row",
-                        "old_value": f"PI_NO={old_pi_no}",
-                        "new_value": None,
-                        "change_type": "MASTER_DELETE",
-                        "remarks": f"Master slot {old_pi_no} deleted (master count reduced)",
-                        "insert_id": insert_id,
-                    })
+            # Step 4: Audit deleted master slots (unclaimed DB rows)
+            unclaimed_pi_nos = sorted(set(existing_rows.keys()) - claimed_db_pi_nos)
+            for old_pi_no in unclaimed_pi_nos:
+                audit_logs.append({
+                    "version": version_value,
+                    "watch_id": watch_id,
+                    "file_version_id": file_version_id,
+                    "file_name": file_name,
+                    "file_hash": file_hash,
+                    "vpo_code": vpo_code,
+                    "pi_no": old_pi_no,
+                    "change_key": "master_row",
+                    "old_value": f"PI_NO={old_pi_no}",
+                    "new_value": None,
+                    "change_type": "MASTER_DELETE",
+                    "remarks": f"Master slot {old_pi_no} deleted (master count reduced)",
+                    "insert_id": insert_id,
+                })
 
-            # Step 4: Write all audit entries to fs3.pre_cs_measurement_change_log
+            # Step 5: Write all audit entries to fs3.pre_cs_measurement_change_log
             if audit_logs:
                 self._insert_audit_logs(cur, audit_logs)
 
-            # Step 5: Execute master upserts and cleanup
-            for pi_no, master_record in enumerate(master_records, start=1):
+            # Step 6: Execute master upserts
+            for pi_no, master_record in resolved_records:
                 values = self._prepare_master_values(
                     master_record,
                     version=version_value,
@@ -715,15 +778,19 @@ class MeasurementRepository:
                 params = tuple(values.get(key) for key in self._MASTER_VALUE_KEYS)
                 cur.execute(statement, params + (insert_id, insert_id))
 
-            cur.execute(
-                """
-                DELETE FROM fs3.pre_m_measurement
-                WHERE version = %s
-                  AND vpo_code = %s
-                  AND pi_no > %s;
-                """,
-                (version_value, vpo_code, len(master_records)),
-            )
+            # Step 7: Clean up deleted master rows
+            if unclaimed_pi_nos:
+                cur.execute(
+                    """
+                    DELETE FROM fs3.pre_m_measurement
+                    WHERE version = %s
+                      AND vpo_code = %s
+                      AND pi_no = ANY(%s);
+                    """,
+                    (version_value, vpo_code, unclaimed_pi_nos),
+                )
+
+        return column_map
 
     def _insert_audit_logs(
         self,
@@ -773,25 +840,82 @@ class MeasurementRepository:
                 ),
             )
 
+    @classmethod
+    def remap_transaction_records(
+        cls,
+        transaction_records: List[Dict[str, Any]],
+        column_map: Dict[str, str],
+    ) -> List[Dict[str, Any]]:
+        """Remap transaction record data_xxx keys using resolved PI_NO data columns.
+
+        Ensures workbook-position data columns (e.g. data_118) are remapped to their
+        resolved PI_NO data columns (e.g. data_122) prior to transaction sync.
+        """
+        if not column_map or not transaction_records:
+            return transaction_records
+
+        # Fail fast if the supplied mapping itself resolves two workbook columns
+        # to the same PI_NO data column.
+        destination_sources: Dict[str, str] = {}
+        for source_col, resolved_col in column_map.items():
+            previous_source = destination_sources.get(resolved_col)
+            if previous_source is not None and previous_source != source_col:
+                raise ValueError(
+                    "Transaction remap collision detected: "
+                    f"{previous_source} and {source_col} both resolved to {resolved_col}"
+                )
+            destination_sources[resolved_col] = source_col
+
+        remapped_list: List[Dict[str, Any]] = []
+        for record in transaction_records:
+            new_record = dict(record)
+
+            # Collect existing transaction measurement values from record
+            data_values: Dict[str, Any] = {}
+            for col in cls._TRANSACTION_DATA_COLUMNS:
+                if col in record:
+                    data_values[col] = record[col]
+
+            # Clear all data_xxx columns in new_record
+            for col in cls._TRANSACTION_DATA_COLUMNS:
+                new_record[col] = None
+
+            # Track which source column populated each resolved destination.
+            resolved_sources: Dict[str, str] = {}
+
+            # Remap values using column_map (orig_data_col -> resolved_data_col)
+            for orig_col, val in data_values.items():
+                if val is not None:
+                    resolved_col = column_map.get(orig_col, orig_col)
+
+                    previous_source = resolved_sources.get(resolved_col)
+                    if previous_source is not None and previous_source != orig_col:
+                        raise ValueError(
+                            "Transaction remap collision detected: "
+                            f"{previous_source} and {orig_col} both resolved to {resolved_col}"
+                        )
+
+                    # Never overwrite a non-null measurement originating from
+                    # another source column.
+                    if (
+                        new_record.get(resolved_col) is not None
+                        and resolved_sources.get(resolved_col) != orig_col
+                    ):
+                        raise ValueError(
+                            "Transaction remap collision detected: "
+                            f"{resolved_sources[resolved_col]} and {orig_col} "
+                            f"both resolved to {resolved_col}"
+                        )
+
+                    resolved_sources[resolved_col] = orig_col
+                    new_record[resolved_col] = val
+
+            remapped_list.append(new_record)
+
+        return remapped_list
+
 # =========================================================================
 # ARCHITECTURAL DESIGN: Watch-ID Scoped Transaction Synchronization
-# =========================================================================
-# 1. Synchronization Boundary:
-# Transactions are synchronized using:
-# (version, vpo_code, watch_id)
-#
-# file_version_id is retained only for lineage, auditing,
-# and source workbook traceability.
-#
-# 2. Historical Record Preservation:
-# Transactions belonging to different watch_ids are excluded
-# from synchronization and are never deleted when another
-# workbook/month is processed.
-#
-# 3. Transaction Synchronization (INSERT / UPDATE / DELETE):
-# - INSERT: New serial found in workbook.
-# - UPDATE: Existing serial measurement values changed.
-# - DELETE: Serial removed from the same watch_id scope.
 # =========================================================================
 
     def sync_transactions(
@@ -804,10 +928,13 @@ class MeasurementRepository:
         file_name: Optional[str] = None,
         file_hash: Optional[str] = None,
         insert_id: str = "Vig",
+        master_records: Optional[List[Dict[str, Any]]] = None,
+        column_map: Optional[Dict[str, str]] = None,
     ) -> int:
         """Synchronize transaction records so fs3.pre_t_measurement matches the workbook scope.
 
-        Performs full INSERT / UPDATE / DELETE synchronization scoped strictly to transactions belonging to the specified watch_id., preserving historical records from other files/months
+        Performs full INSERT / UPDATE / DELETE synchronization scoped strictly to transactions
+        belonging to the specified watch_id, preserving historical records from other files/months
         while allowing deletions of corrected records within the target file.
         """
         if not isinstance(transaction_records, list):
@@ -819,6 +946,21 @@ class MeasurementRepository:
         vpo_code = self._normalize_text(transaction_records[0].get("vpo_code"))
         if not vpo_code:
             raise ValueError("vpo_code is required in transaction_records")
+
+        # Resolve active column mapping for remapping workbook-position data columns
+        active_column_map: Dict[str, str] = {}
+        if column_map is not None:
+            active_column_map = column_map
+        elif master_records:
+            for idx, m_rec in enumerate(master_records, start=1):
+                orig = m_rec.get("orig_data_column") or f"data_{idx:03d}"
+                res = m_rec.get("data_column") or f"data_{m_rec.get('pi_no', idx):03d}"
+                active_column_map[orig] = res
+        elif self._last_column_map is not None and self._last_vpo_code == vpo_code:
+            active_column_map = self._last_column_map
+
+        if active_column_map:
+            transaction_records = self.remap_transaction_records(transaction_records, active_column_map)
 
         # Normalize incoming records
         prepared_incoming: Dict[tuple, Dict[str, Any]] = {}
@@ -840,7 +982,7 @@ class MeasurementRepository:
         audit_logs: List[Dict[str, Any]] = []
 
         with self.conn.cursor() as cur:
-            # Step 1: Read existing DB transaction rows scoped strictly to file_version_id boundary
+            # Step 1: Read existing DB transaction rows scoped strictly to watch_id boundary
             select_cols = (
                 [
                     "date",
@@ -883,7 +1025,7 @@ class MeasurementRepository:
             incoming_keys: Set[tuple] = set(prepared_incoming.keys())
             existing_keys: Set[tuple] = set(existing_db_map.keys())
 
-            # Step 2: Identify TRANSACTION_DELETE (scoped strictly to current file_version_id)
+            # Step 2: Identify TRANSACTION_DELETE (scoped strictly to current watch_id)
             keys_to_delete = existing_keys - incoming_keys
             for del_key in keys_to_delete:
                 deleted_rec = existing_db_map[del_key]
@@ -909,7 +1051,7 @@ class MeasurementRepository:
                     DELETE FROM fs3.pre_t_measurement
                     WHERE version = %s AND vpo_code = %s AND watch_id = %s AND date = %s AND serial_no_m_last4 = %s;
                 """
-                cur.execute(del_sql, (version_value, vpo_code, watch_id,del_key[0], del_key[1]))
+                cur.execute(del_sql, (version_value, vpo_code, watch_id, del_key[0], del_key[1]))
 
             # Step 3: Identify TRANSACTION_INSERT & TRANSACTION_UPDATE
             for inc_key, inc_rec in prepared_incoming.items():

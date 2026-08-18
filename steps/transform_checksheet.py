@@ -381,10 +381,11 @@ pipeline_type="CHECKSHEET",
 
     @staticmethod
     def _normalize_measurement_value(value: Any) -> Any:
-        """Convert float measurements to fixed-point decimal text."""
-        if not isinstance(value, float):
-            return value
-        return format(Decimal(str(value)), "f")
+        """Preserve Excel values while avoiding scientific notation."""
+        if isinstance(value, float):
+            text = format(value, ".15f")
+            return text.rstrip("0").rstrip(".")
+        return value
 
     @staticmethod
     def _contains_direction_marker(value: Any) -> bool:

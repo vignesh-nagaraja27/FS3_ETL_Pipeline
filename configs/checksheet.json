@@ -33,8 +33,8 @@
     "_readme_32": "After max retries the file is moved to AWAITING_REVIEW.",
     "watch_directories": [
         {
-            "watch_id": "GT3_CR_APRIL2026",
-            "source_path": "C:\\Users\\z627973\\OneDrive - トヨタ自動車株式会社\\CR",
+            "watch_id": "GT3_CR_JAN2026",
+            "source_path": "C:\\Users\\z627973\\OneDrive - トヨタ自動車株式会社\\GT3_CR",
             "pipeline_type": "CHECKSHEET",
             "version": "00000000",
             "change_check_interval_minutes": 5,
@@ -47,8 +47,8 @@
             "enabled": true
         },
         {
-            "watch_id": "GT3_CR_DEC2025",
-            "source_path": "C:\\Users\\z627973\\OneDrive - トヨタ自動車株式会社\\GT3_CR",
+            "watch_id": "GT3_CR_JUNE2026",
+            "source_path": "C:\\Users\\z627973\\OneDrive - トヨタ自動車株式会社\\CR",
             "pipeline_type": "CHECKSHEET",
             "version": "00000000",
             "change_check_interval_minutes": 5,
