@@ -128,7 +128,13 @@ class StatusManager:
         model: Optional[str] = None,
         part: Optional[str] = None,
         op: Optional[str] = None,
+        **kwargs,
     ):
+        if kwargs:
+            LOGGER.warning(
+                f"STATUS MANAGER ignored unexpected kwargs: {kwargs}",
+                pipeline_type="SYSTEM",
+            )
         sql = f"UPDATE {self.TABLE_LOG} SET status='PROCESSING', current_step='DLQ_RETRY', error_message=NULL, updated_at=NOW() WHERE id=%s;"
         try:
             with self._db.get_connection() as conn:
@@ -155,7 +161,13 @@ class StatusManager:
         model: Optional[str] = None,
         part: Optional[str] = None,
         op: Optional[str] = None,
+        **kwargs,
     ):
+        if kwargs:
+            LOGGER.warning(
+                f"STATUS MANAGER ignored unexpected kwargs: {kwargs}",
+                pipeline_type="SYSTEM",
+            )
         self._update_log(log_id, PipelineStatus.PROCESSING, current_step=step_name)
         self._write_audit(
             "INFO",
@@ -175,7 +187,13 @@ class StatusManager:
         model: Optional[str] = None,
         part: Optional[str] = None,
         op: Optional[str] = None,
+        **kwargs,
     ):
+        if kwargs:
+            LOGGER.warning(
+                f"STATUS MANAGER ignored unexpected kwargs: {kwargs}",
+                pipeline_type="SYSTEM",
+            )
         # Finalize the pipeline log: status COMPLETED and mark current_step=COMPLETED
         self._update_log(
             log_id,
@@ -207,7 +225,13 @@ class StatusManager:
         failed_step: Optional[str] = None,
         file_path: Optional[str] = None,
         file_name: Optional[str] = None,
+        **kwargs,
     ):
+        if kwargs:
+            LOGGER.warning(
+                f"STATUS MANAGER ignored unexpected kwargs: {kwargs}",
+                pipeline_type="SYSTEM",
+            )
         error_message = str(exc) if exc else "Unknown failure"
         traceback_str = tb_module.format_exc() if exc else None
 
@@ -253,7 +277,13 @@ class StatusManager:
         part: Optional[str] = None,
         op: Optional[str] = None,
         step: Optional[str] = None,
+        **kwargs,
     ):
+        if kwargs:
+            LOGGER.warning(
+                f"STATUS MANAGER ignored unexpected kwargs: {kwargs}",
+                pipeline_type="SYSTEM",
+            )
         self._write_audit("WARNING", message, log_id, machine, model, part, op, step)
 
     def write_critical(
@@ -266,7 +296,13 @@ class StatusManager:
         op: Optional[str] = None,
         step: Optional[str] = None,
         exc: Optional[Exception] = None,
+        **kwargs,
     ):
+        if kwargs:
+            LOGGER.warning(
+                f"STATUS MANAGER ignored unexpected kwargs: {kwargs}",
+                pipeline_type="SYSTEM",
+            )
         traceback_str = tb_module.format_exc() if exc else None
         self._write_audit(
             "CRITICAL", message, log_id, machine, model, part, op, step, traceback_str

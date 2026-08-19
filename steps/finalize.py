@@ -61,7 +61,7 @@ class FinalizeStep:
         and removes the staged processing copy on success.
         """
         context = dict(
-            machine=machine_id, model=vehicle_model, part=parts_code, op=op_no
+            machine=machine_id, model=vehicle_model, part=parts_code, op=op_no,pipeline_type=pipeline_type,
         )
         dest_dir = self._resolve_destination_dir(
             success=True,
@@ -93,7 +93,7 @@ class FinalizeStep:
         and removes the staged processing copy on failure.
         """
         context = dict(
-            machine=machine_id, model=vehicle_model, part=parts_code, op=op_no
+            machine=machine_id, model=vehicle_model, part=parts_code, op=op_no,pipeline_type=pipeline_type,
         )
         dest_dir = self._resolve_destination_dir(
             success=False,
@@ -110,26 +110,31 @@ class FinalizeStep:
         return dest_path
 
     def _resolve_destination_dir(
-        self,
-        success: bool,
-        machine_id: str,
-        vehicle_model: str,
-        parts_code: str,
-        op_no: str,
+            self,
+            success: bool,
+            machine_id: str,
+            vehicle_model: str,
+            parts_code: str,
+            op_no: str,
     ) -> Path:
         if self._destination_root:
             _, completed_path, ng_path = get_working_paths(
-                destination_root=self._destination_root,
-                mc_no=machine_id,
-                vehicle_model=vehicle_model,
-                parts_code=parts_code,
-                op_no=op_no,
-                create=True,
+            destination_root=self._destination_root,
+            mc_no=machine_id,
+            vehicle_model=vehicle_model,
+            parts_code=parts_code,
+            op_no=op_no,
+            create=True,
             )
             return completed_path if success else ng_path
 
         if success:
+            if self._base_completed_dir is None:
+                raise ValueError("base_completed_dir is not configured")
             return self._base_completed_dir
+
+        if self._base_ng_dir is None:
+            raise ValueError("base_ng_dir is not configured")
         return self._base_ng_dir
 
     def _move(

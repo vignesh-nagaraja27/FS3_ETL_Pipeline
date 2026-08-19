@@ -33,7 +33,7 @@
       "stable_wait_sec": 2,
       "stable_required_count": 3,
       "max_workers": 4,
-      "enabled": true
+      "enabled": false
     },
     {
       "machine_id": "KTS-7106",
@@ -56,7 +56,7 @@
       "poll_interval_sec": 5,
       "stable_wait_sec": 2,
       "stable_required_count": 3,
-      "max_workers": 2,
+      "max_workers": 4,
       "enabled": true,
       "ignore_file_prefixes": [
         "E-NR-BLOCK"
@@ -107,12 +107,12 @@
   },
   "destination_root": {
     "description": "Root folder for the per-operation destination structure. The pipeline builds <destination_root>/<MC_NO>/<VEHICLE_MODEL>/<PARTS_CODE>/<OP_NO>/{_processing, _completed, _NG} automatically for every incoming file.",
-    "path": "C:/FS3/DataCollect"
+    "path": "C:/FS3/DataCollect/10_品質/02_3次元"
   },
   "processing_folders": {
     "description": "Legacy flat staging folders. Kept for backward compatibility but no longer used by the pipeline — the per-operation structure under 'destination_root' replaces them.",
-    "processing": "C:/FS3/DataCollect/_processing",
-    "completed": "C:/FS3/DataCollect/_completed",
-    "ng": "C:/FS3/DataCollect/_NG"
+    "processing": "C:/FS3/DataCollect/10_品質/02_3次元/_processing",
+    "completed": "C:/FS3/DataCollect/10_品質/02_3次元/_completed",
+    "ng": "C:/FS3/DataCollect/10_品質/02_3次元/_NG"
   }
 }

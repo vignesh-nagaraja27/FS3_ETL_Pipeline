@@ -51,6 +51,7 @@ class CopyStep:
         vehicle_model: str,
         parts_code: str,
         op_no: str,
+        pipeline_type: str,
         stable_wait_sec: float = 2.0,
         stable_required_count: int = 3,
     ) -> Path:
@@ -79,7 +80,7 @@ class CopyStep:
             RuntimeError: If the file never stabilizes within the timeout window.
         """
         context = dict(
-            machine=machine_id, model=vehicle_model, part=parts_code, op=op_no
+            machine=machine_id, model=vehicle_model, part=parts_code, op=op_no,pipeline_type=pipeline_type,
         )
 
         LOGGER.info(f"COPY STEP started for '{source_path.name}'.", **context)

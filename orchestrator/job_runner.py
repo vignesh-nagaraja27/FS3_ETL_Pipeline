@@ -438,7 +438,7 @@ class JobRunner:
                     if not file_path.exists():
                         continue
 
-                    pipeline_type, part_config = self._dispatcher.classify(file_path)
+                    pipeline_type, part_config = self._dispatcher.classify_from_watcher(file_path=file_path,watch_config=machine_config)
                     if pipeline_type == PIPELINE_UNKNOWN or part_config is None:
                         continue
 
@@ -551,7 +551,7 @@ class JobRunner:
                         continue
 
                     seen_files.add(str(file_path))
-                    pipeline_type, part_config = self._dispatcher.classify(file_path)
+                    pipeline_type, part_config = self._dispatcher.classify_from_watcher(file_path=file_path,watch_config=machine_config,)
 
                     if pipeline_type == PIPELINE_UNKNOWN or part_config is None:
                         continue
@@ -705,7 +705,7 @@ class JobRunner:
                     with db.get_connection() as conn:
                         ChecksheetDownloadRepository(conn).mark_stable(lifecycle_id)
 
-                    pipeline_type, part_config = self._dispatcher.classify(file_path)
+                    pipeline_type, part_config = self._dispatcher.classify_from_watcher(file_path=file_path,watch_config=machine_config,)
                     if pipeline_type != PIPELINE_CHECKSHEET or part_config is None:
                         last_change_check[file_key] = now
                         known_files.add(file_key)

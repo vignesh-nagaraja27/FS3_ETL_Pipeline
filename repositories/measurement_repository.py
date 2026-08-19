@@ -146,7 +146,7 @@ class MeasurementRepository:
     _TRANSACTION_DATA_COLUMNS = tuple(
         f"data_{number:03d}" for number in range(1, 501)
     )
-    _TRANSACTION_CONFLICT_KEYS = {"vpo_code", "date", "serial_no_m_last4"}
+    _TRANSACTION_CONFLICT_KEYS = {"vpo_code", "date", "serial_no_m_last4", "watch_id"}
 
     def __init__(self, connection: _ConnectionProtocol):
         if connection is None:
@@ -352,6 +352,42 @@ class MeasurementRepository:
             )
             return next_pi_no
 
+    def _get_latest_transaction_business_date(
+        self,
+        version: str,
+        vpo_code: str,
+        watch_id: Optional[str] = None,
+        *,
+        cur: Optional[Any] = None,
+    ) -> Optional[date]:
+        """Return the latest transaction business date MAX(date) from fs3.pre_t_measurement."""
+        version_value = self._validated_version(version)
+        vpo_code_value = self._normalize_text(vpo_code)
+        if not watch_id:
+            raise ValueError("watch_id is required")
+        watch_id_value = self._normalize_text(watch_id)
+
+        def _execute(cursor: Any) -> Optional[date]:
+            cursor.execute(
+                """
+                SELECT MAX(date)
+                FROM fs3.pre_t_measurement
+                WHERE version = %s
+                  AND vpo_code = %s
+                  AND watch_id = %s;
+                """,
+                (version_value, vpo_code_value, watch_id_value),
+            )
+            row = cursor.fetchone()
+            if row is None or row[0] is None:
+                return None
+            return self._coerce_date(row[0])
+
+        if cur is not None:
+            return _execute(cur)
+        with self.conn.cursor() as cursor:
+            return _execute(cursor)
+
     def update_limits_if_newer(
         self,
         pi_no: int,
@@ -366,11 +402,18 @@ class MeasurementRepository:
         file_name: Optional[str] = None,
         file_hash: Optional[str] = None,
         insert_id: str = "Vig",
+        cur: Optional[Any] = None,
     ) -> bool:
-        """Update limits when file date is newer than master audit update_date."""
+        """Update limits and generate LIMIT_UPDATE audit records using date precedence.
+
+        Authoritative business precedence date is MAX(fs3.pre_t_measurement.date).
+        Limits are updated only if existing_business_date is NULL or incoming_date > existing_business_date.
+        `pre_m_measurement.update_date` is NEVER used to establish business precedence.
+        """
         version_value = self._validated_version(version)
         vpo_code_value = self._normalize_text(vpo_code)
         incoming_value = self._coerce_date(incoming_date)
+
         if not vpo_code_value:
             raise ValueError("vpo_code is required")
         if incoming_value is None:
@@ -379,8 +422,25 @@ class MeasurementRepository:
         new_upper = self._normalize_nullable_text(upper_limit)
         new_lower = self._normalize_nullable_text(lower_limit)
 
-        with self.conn.cursor() as cur:
-            cur.execute(
+        def _execute_update(cursor: Any) -> bool:
+            existing_business_date = self._get_latest_transaction_business_date(
+                version=version_value,
+                vpo_code=vpo_code_value,
+                watch_id=watch_id,
+                cur=cursor,
+            )
+
+            # STRICT > comparison rule:
+            # If existing_business_date is present, incoming_value MUST be strictly greater.
+            if existing_business_date is not None and incoming_value <= existing_business_date:
+                LOGGER.info(
+                    f"[LIMIT SKIP] PI_NO={pi_no} "
+                    f"incoming_date={incoming_value!r} <= existing_business_date={existing_business_date!r}",
+                    pipeline_type="CHECKSHEET",
+                )
+                return False
+
+            cursor.execute(
                 """
                 SELECT upper_limit, lower_limit, update_date
                 FROM fs3.pre_m_measurement
@@ -391,24 +451,90 @@ class MeasurementRepository:
                 """,
                 (version_value, vpo_code_value, int(pi_no)),
             )
-            row = cur.fetchone()
+
+            row = cursor.fetchone()
+
             if row is None:
+                LOGGER.info(
+                    f"[LIMIT DIAGNOSTIC] "
+                    f"PI_NO={pi_no} "
+                    f"incoming_date={incoming_value!r} "
+                    f"existing_business_date={existing_business_date!r} "
+                    f"old_upper=None "
+                    f"old_lower=None "
+                    f"new_upper={new_upper!r} "
+                    f"new_lower={new_lower!r} "
+                    f"row_is_none=True",
+                    pipeline_type="CHECKSHEET",
+                )
                 LOGGER.info(
                     f"[LIMIT SKIP] PI_NO={pi_no} master row does not yet exist",
                     pipeline_type="CHECKSHEET",
                 )
                 return False
 
-            old_upper, old_lower, existing_update_date = row[0], row[1], row[2]
-            existing_date = self._coerce_date(existing_update_date)
-            if existing_date is not None and incoming_value <= existing_date:
+            old_upper_raw, old_lower_raw, existing_update_date = row[0], row[1], row[2]
+
+            old_upper = self._normalize_nullable_text(old_upper_raw)
+            old_lower = self._normalize_nullable_text(old_lower_raw)
+
+            LOGGER.info(
+                f"[LIMIT DIAGNOSTIC BEFORE UPDATE] "
+                f"PI_NO={pi_no} "
+                f"incoming_date={incoming_value!r} "
+                f"existing_business_date={existing_business_date!r} "
+                f"existing_update_date={existing_update_date!r} "
+                f"old_upper={old_upper!r} "
+                f"old_lower={old_lower!r} "
+                f"new_upper={new_upper!r} "
+                f"new_lower={new_lower!r}",
+                pipeline_type="CHECKSHEET",
+            )
+
+            audit_logs: List[Dict[str, Any]] = []
+
+            if (old_upper or "") != (new_upper or ""):
+                audit_logs.append({
+                    "version": version_value,
+                    "watch_id": watch_id,
+                    "file_version_id": file_version_id,
+                    "file_name": file_name,
+                    "file_hash": file_hash,
+                    "vpo_code": vpo_code_value,
+                    "pi_no": int(pi_no),
+                    "change_key": "upper_limit",
+                    "old_value": old_upper,
+                    "new_value": new_upper,
+                    "change_type": "LIMIT_UPDATE",
+                    "remarks": f"Limit update from file date {incoming_value}",
+                    "insert_id": insert_id,
+                })
+
+            if (old_lower or "") != (new_lower or ""):
+                audit_logs.append({
+                    "version": version_value,
+                    "watch_id": watch_id,
+                    "file_version_id": file_version_id,
+                    "file_name": file_name,
+                    "file_hash": file_hash,
+                    "vpo_code": vpo_code_value,
+                    "pi_no": int(pi_no),
+                    "change_key": "lower_limit",
+                    "old_value": old_lower,
+                    "new_value": new_lower,
+                    "change_type": "LIMIT_UPDATE",
+                    "remarks": f"Limit update from file date {incoming_value}",
+                    "insert_id": insert_id,
+                })
+
+            if not audit_logs:
                 LOGGER.info(
-                    f"[LIMIT SKIP] PI_NO={pi_no} incoming={incoming_value} existing_update_date={existing_update_date}",
+                    f"[LIMIT DIAGNOSTIC] PI_NO={pi_no} limits unchanged, skip update/audit",
                     pipeline_type="CHECKSHEET",
                 )
                 return False
 
-            cur.execute(
+            cursor.execute(
                 """
                 UPDATE fs3.pre_m_measurement
                 SET upper_limit = %s,
@@ -428,67 +554,48 @@ class MeasurementRepository:
                     int(pi_no),
                 ),
             )
-            updated = cur.rowcount == 1
+
+            updated = cursor.rowcount == 1
+
+            LOGGER.info(
+                f"[LIMIT DIAGNOSTIC] "
+                f"PI_NO={pi_no} "
+                f"updated={updated} "
+                f"rowcount={cursor.rowcount} "
+                f"audit_logs_count={len(audit_logs)}",
+                pipeline_type="CHECKSHEET",
+            )
 
             if updated:
-                audit_logs = []
-                if (old_upper or "") != (new_upper or ""):
-                    audit_logs.append({
-                        "version": version_value,
-                        "watch_id": watch_id,
-                        "file_version_id": file_version_id,
-                        "file_name": file_name,
-                        "file_hash": file_hash,
-                        "vpo_code": vpo_code_value,
-                        "pi_no": int(pi_no),
-                        "change_key": "upper_limit",
-                        "old_value": old_upper,
-                        "new_value": new_upper,
-                        "change_type": "LIMIT_UPDATE",
-                        "remarks": f"Limit update from file date {incoming_value}",
-                        "insert_id": insert_id,
-                    })
-                if (old_lower or "") != (new_lower or ""):
-                    audit_logs.append({
-                        "version": version_value,
-                        "watch_id": watch_id,
-                        "file_version_id": file_version_id,
-                        "file_name": file_name,
-                        "file_hash": file_hash,
-                        "vpo_code": vpo_code_value,
-                        "pi_no": int(pi_no),
-                        "change_key": "lower_limit",
-                        "old_value": old_lower,
-                        "new_value": new_lower,
-                        "change_type": "LIMIT_UPDATE",
-                        "remarks": f"Limit update from file date {incoming_value}",
-                        "insert_id": insert_id,
-                    })
-                if audit_logs:
-                    self._insert_audit_logs(cur, audit_logs)
+                self._insert_audit_logs(cursor, audit_logs)
+                LOGGER.info(
+                    f"[LIMIT UPDATE] "
+                    f"PI_NO={pi_no} "
+                    f"incoming={incoming_value} "
+                    f"existing_business_date={existing_business_date}",
+                    pipeline_type="CHECKSHEET",
+                )
 
-        if updated:
-            LOGGER.info(
-                f"[LIMIT UPDATE] PI_NO={pi_no} incoming={incoming_value} previous_update_date={existing_update_date}",
-                pipeline_type="CHECKSHEET",
-            )
-        else:
-            LOGGER.info(
-                f"[LIMIT SKIP] PI_NO={pi_no} master row was not updated",
-                pipeline_type="CHECKSHEET",
-            )
-        return updated
+            return updated
+
+        if cur is not None:
+            return _execute_update(cur)
+        with self.conn.cursor() as cursor:
+            return _execute_update(cursor)
 
     def insert_master(self, master_data: Mapping[str, Any]) -> int:
         """Insert one master row using the explicitly supplied positional PI_NO."""
         version_value = self._validated_version(master_data.get("version"))
         pi_no = int(master_data["pi_no"])
+
         values = self._prepare_master_values(
             master_data,
             version=version_value,
             pi_no=pi_no,
         )
+
         params = tuple(values.get(key) for key in self._MASTER_VALUE_KEYS)
+
         statement = sql.SQL(
             """
             INSERT INTO fs3.pre_m_measurement (
@@ -508,6 +615,7 @@ class MeasurementRepository:
 
         with self.conn.cursor() as cur:
             cur.execute(statement, params + ("Vig", "Vig"))
+
         return pi_no
 
     # =========================================================================
@@ -519,6 +627,7 @@ class MeasurementRepository:
         master_records: List[Dict[str, Any]],
         version: str = CHECKSHEET_VERSION,
         *,
+        incoming_file_date: DateValue,
         watch_id: Optional[str] = None,
         file_version_id: Optional[int] = None,
         file_name: Optional[str] = None,
@@ -530,28 +639,38 @@ class MeasurementRepository:
         Performs field-by-field diff comparison against fs3.pre_m_measurement before
         upserting, generating generic key-value audit log entries in
         fs3.pre_cs_measurement_change_log for every changed master field.
-
-        Returns the resolved workbook-column -> PI_NO data-column mapping so the
-        caller can explicitly pass it to sync_transactions(), including when that
-        method runs on a different repository instance.
         """
         if not isinstance(master_records, list):
             raise TypeError("master_records must be a list of master dictionaries")
+
         if not master_records:
             raise ValueError("master_records must not be empty")
+
         if len(master_records) > self.MAX_PI_NO:
             raise ValueError(f"master_records cannot exceed {self.MAX_PI_NO}")
 
+        coerced_incoming_date = self._coerce_date(incoming_file_date)
+        if coerced_incoming_date is None:
+            raise ValueError("incoming_file_date is required and must be a valid date or datetime")
+
         version_value = self._validated_version(version)
         vpo_code = self._normalize_text(master_records[0].get("vpo_code"))
+
         if not vpo_code:
             raise ValueError("vpo_code is required in master_records")
 
         conflict_update_columns = [
             column
             for column in self._MASTER_DB_COLUMNS
-            if column not in {"version", "vpo_code", "pi_no", "upper_limit", "lower_limit"}
+            if column not in {
+                "version",
+                "vpo_code",
+                "pi_no",
+                "upper_limit",
+                "lower_limit",
+            }
         ]
+
         statement = sql.SQL(
             """
             INSERT INTO fs3.pre_m_measurement (
@@ -590,16 +709,23 @@ class MeasurementRepository:
                 WHERE version = %s AND vpo_code = %s;
                 """
             ).format(
-                sql.SQL(", ").join(sql.Identifier(col) for col in self._AUDITABLE_MASTER_FIELDS)
+                sql.SQL(", ").join(
+                    sql.Identifier(col)
+                    for col in self._AUDITABLE_MASTER_FIELDS
+                )
             )
+
             cur.execute(fetch_sql, (version_value, vpo_code))
             existing_db_tuples = cur.fetchall()
 
             # Map pi_no -> dict of auditable field values
             existing_rows: Dict[int, Dict[str, Any]] = {}
+
             for row in existing_db_tuples:
                 pi = int(row[0])
-                existing_rows[pi] = dict(zip(self._AUDITABLE_MASTER_FIELDS, row[1:]))
+                existing_rows[pi] = dict(
+                    zip(self._AUDITABLE_MASTER_FIELDS, row[1:])
+                )
 
             audit_logs: List[Dict[str, Any]] = []
 
@@ -611,41 +737,87 @@ class MeasurementRepository:
 
             for idx, master_record in enumerate(master_records, start=1):
                 if not isinstance(master_record, dict):
-                    raise TypeError("every master_records entry must be a dictionary")
-                record_vpo_code = self._normalize_text(master_record.get("vpo_code"))
-                if record_vpo_code != vpo_code:
-                    raise ValueError("all master_records must use the same vpo_code")
-                if master_record.get("version") != version_value:
-                    raise ValueError("all master_records must use version '00000000'")
+                    raise TypeError(
+                        "every master_records entry must be a dictionary"
+                    )
 
-                orig_data_col = master_record.get("data_column") or f"data_{idx:03d}"
+                record_vpo_code = self._normalize_text(
+                    master_record.get("vpo_code")
+                )
+
+                if record_vpo_code != vpo_code:
+                    raise ValueError(
+                        "all master_records must use the same vpo_code"
+                    )
+
+                if master_record.get("version") != version_value:
+                    raise ValueError(
+                        "all master_records must use version '00000000'"
+                    )
+
+                orig_data_col = (
+                    master_record.get("data_column")
+                    or f"data_{idx:03d}"
+                )
+
                 pi_no: Optional[int] = None
 
-                # STEP 1: Search DB via business-key resolver (_pi_search)
-                existing_pi = self._pi_search(cur, master_record, version_value)
-                if existing_pi is not None and existing_pi not in claimed_db_pi_nos:
+                # SEARCH 1: Search DB via business-key resolver (_pi_search)
+                existing_pi = self._pi_search(
+                    cur,
+                    master_record,
+                    version_value,
+                )
+
+                if (
+                    existing_pi is not None
+                    and existing_pi not in claimed_db_pi_nos
+                ):
                     pi_no = existing_pi
 
-                # STEP 2: Search unclaimed DB master rows matching:
-                # op_name, Inspection_no, measure_item, measure_point, measure_direction, measure_depth
+                # SEARCH 2: Search unclaimed DB master rows matching business keys
                 if pi_no is None:
-                    rec_op_name = self._normalize_text(master_record.get("op_name"))
-                    rec_inspection_no = self._normalize_text(master_record.get("Inspection_no"))
-                    rec_item = self._normalize_text(master_record.get("measure_item"))
-                    rec_point = self._normalize_text(master_record.get("measure_point"))
-                    rec_dir = self._normalize_text(master_record.get("measure_direction"))
-                    rec_depth = self._normalize_text(master_record.get("measure_depth"))
+                    rec_op_name = self._normalize_text(
+                        master_record.get("op_name")
+                    )
+                    rec_inspection_no = self._normalize_text(
+                        master_record.get("Inspection_no")
+                    )
+                    rec_item = self._normalize_text(
+                        master_record.get("measure_item")
+                    )
+                    rec_point = self._normalize_text(
+                        master_record.get("measure_point")
+                    )
+                    rec_dir = self._normalize_text(
+                        master_record.get("measure_direction")
+                    )
+                    rec_depth = self._normalize_text(
+                        master_record.get("measure_depth")
+                    )
 
                     for ex_pi, ex_fields in existing_rows.items():
                         if ex_pi in claimed_db_pi_nos:
                             continue
 
-                        ex_op_name = self._normalize_text(ex_fields.get("op_name"))
-                        ex_inspection_no = self._normalize_text(ex_fields.get("Inspection_no"))
-                        ex_item = self._normalize_text(ex_fields.get("measure_item"))
-                        ex_point = self._normalize_text(ex_fields.get("measure_point"))
-                        ex_dir = self._normalize_text(ex_fields.get("measure_direction"))
-                        ex_depth = self._normalize_text(ex_fields.get("measure_depth"))
+                        ex_op_name = self._normalize_text(
+                            ex_fields.get("op_name")
+                        )
+                        ex_inspection_no = self._normalize_text(
+                            ex_fields.get("Inspection_no")
+                        )
+                        ex_item = self._normalize_text(
+                            ex_fields.get("measure_item")
+                        )
+                        ex_point = self._normalize_text(
+                            ex_fields.get("measure_point")
+                        )
+                        ex_dir = self._normalize_text(
+                            ex_fields.get("measure_direction")
+                        )
+                        ex_depth = self._normalize_text(
+                            ex_fields.get("measure_depth")
+                        )
 
                         if (
                             rec_op_name == ex_op_name
@@ -658,31 +830,37 @@ class MeasurementRepository:
                             pi_no = ex_pi
                             break
 
-                # STEP 3: Allocate a new PI_NO if no existing definition matches
+                # SEARCH 3: Allocate a new PI_NO if no existing definition matches
                 if pi_no is None:
                     next_pi = max(used_pi_nos, default=0) + 1
+
                     if next_pi > self.MAX_PI_NO:
-                        raise ValueError(f"PI_NO exceeds supported maximum {self.MAX_PI_NO}")
+                        raise ValueError(
+                            f"PI_NO exceeds supported maximum {self.MAX_PI_NO}"
+                        )
+
                     pi_no = next_pi
 
                 claimed_db_pi_nos.add(pi_no)
                 used_pi_nos.add(pi_no)
 
                 resolved_data_col = f"data_{pi_no:03d}"
+
                 master_record["pi_no"] = pi_no
                 master_record["data_column"] = resolved_data_col
                 master_record["orig_data_column"] = orig_data_col
+
                 column_map[orig_data_col] = resolved_data_col
 
-                resolved_records.append((pi_no, master_record))
+                resolved_records.append(
+                    (pi_no, master_record)
+                )
 
-            # Return the resolved column mapping explicitly to the caller.
-            # Repository instance state is not required for transaction remapping.
-            # Keep the legacy state only as a backward-compatible fallback.
             self._last_column_map = column_map
             self._last_vpo_code = vpo_code
 
-            # Step 3: Compare resolved master records against existing DB rows for audit logging
+            # Step 3: Compare resolved master records against existing DB rows
+            # for audit logging
             for pi_no, master_record in resolved_records:
                 values = self._prepare_master_values(
                     master_record,
@@ -694,7 +872,11 @@ class MeasurementRepository:
                     # New PI_NO slot creation -> MASTER_INSERT
                     for field in self._AUDITABLE_MASTER_FIELDS:
                         new_val = values.get(field)
-                        if new_val is not None and str(new_val).strip() != "":
+
+                        if (
+                            new_val is not None
+                            and str(new_val).strip() != ""
+                        ):
                             audit_logs.append({
                                 "version": version_value,
                                 "watch_id": watch_id,
@@ -713,8 +895,8 @@ class MeasurementRepository:
                 else:
                     # Existing PI_NO slot -> Field-by-field comparison
                     ex_fields = existing_rows[pi_no]
+
                     for field in self._AUDITABLE_MASTER_FIELDS:
-                        # Note: sync_masters excludes limits from conflict update
                         if field in {"upper_limit", "lower_limit"}:
                             continue
 
@@ -726,6 +908,7 @@ class MeasurementRepository:
 
                         if old_str != new_str:
                             change_type = "GENERAL_UPDATE"
+
                             if field == "specification":
                                 change_type = "SPECIFICATION_UPDATE"
 
@@ -746,7 +929,10 @@ class MeasurementRepository:
                             })
 
             # Step 4: Audit deleted master slots (unclaimed DB rows)
-            unclaimed_pi_nos = sorted(set(existing_rows.keys()) - claimed_db_pi_nos)
+            unclaimed_pi_nos = sorted(
+                set(existing_rows.keys()) - claimed_db_pi_nos
+            )
+
             for old_pi_no in unclaimed_pi_nos:
                 audit_logs.append({
                     "version": version_value,
@@ -760,7 +946,10 @@ class MeasurementRepository:
                     "old_value": f"PI_NO={old_pi_no}",
                     "new_value": None,
                     "change_type": "MASTER_DELETE",
-                    "remarks": f"Master slot {old_pi_no} deleted (master count reduced)",
+                    "remarks": (
+                        f"Master slot {old_pi_no} deleted "
+                        "(master count reduced)"
+                    ),
                     "insert_id": insert_id,
                 })
 
@@ -768,17 +957,49 @@ class MeasurementRepository:
             if audit_logs:
                 self._insert_audit_logs(cur, audit_logs)
 
-            # Step 6: Execute master upserts
+            # Step 6: Execute master upserts (conflict_update_columns excludes limits)
             for pi_no, master_record in resolved_records:
                 values = self._prepare_master_values(
                     master_record,
                     version=version_value,
                     pi_no=pi_no,
                 )
-                params = tuple(values.get(key) for key in self._MASTER_VALUE_KEYS)
-                cur.execute(statement, params + (insert_id, insert_id))
 
-            # Step 7: Clean up deleted master rows
+                params = tuple(
+                    values.get(key)
+                    for key in self._MASTER_VALUE_KEYS
+                )
+
+                cur.execute(
+                    statement,
+                    params + (insert_id, insert_id),
+                )
+
+            # Step 7: Evaluate date-controlled limits after PI_NO resolution and upsert
+            for pi_no, master_record in resolved_records:
+                limits_updated = self.update_limits_if_newer(
+                    pi_no=pi_no,
+                    incoming_date=coerced_incoming_date,
+                    upper_limit=master_record.get("upper_limit"),
+                    lower_limit=master_record.get("lower_limit"),
+                    version=version_value,
+                    vpo_code=vpo_code,
+                    watch_id=watch_id,
+                    file_version_id=file_version_id,
+                    file_name=file_name,
+                    file_hash=file_hash,
+                    insert_id=insert_id,
+                    cur=cur,
+                )
+                LOGGER.info(
+                    f"[LIMIT UPDATE] Evaluated limit update after PI_NO resolution: "
+                    f"pi_no={pi_no}, "
+                    f"updated={limits_updated}, "
+                    f"incoming_file_date={coerced_incoming_date}",
+                    pipeline_type="CHECKSHEET",
+                )
+
+            # Step 8: Clean up deleted master rows
             if unclaimed_pi_nos:
                 cur.execute(
                     """
@@ -787,7 +1008,11 @@ class MeasurementRepository:
                       AND vpo_code = %s
                       AND pi_no = ANY(%s);
                     """,
-                    (version_value, vpo_code, unclaimed_pi_nos),
+                    (
+                        version_value,
+                        vpo_code,
+                        unclaimed_pi_nos,
+                    ),
                 )
 
         return column_map
@@ -820,6 +1045,7 @@ class MeasurementRepository:
                 CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, %s
             );
         """
+
         for log in audit_logs:
             cur.execute(
                 insert_sql,
@@ -846,57 +1072,64 @@ class MeasurementRepository:
         transaction_records: List[Dict[str, Any]],
         column_map: Dict[str, str],
     ) -> List[Dict[str, Any]]:
-        """Remap transaction record data_xxx keys using resolved PI_NO data columns.
-
-        Ensures workbook-position data columns (e.g. data_118) are remapped to their
-        resolved PI_NO data columns (e.g. data_122) prior to transaction sync.
-        """
+        """Remap transaction record data_xxx keys using resolved PI_NO data columns."""
         if not column_map or not transaction_records:
             return transaction_records
 
-        # Fail fast if the supplied mapping itself resolves two workbook columns
-        # to the same PI_NO data column.
         destination_sources: Dict[str, str] = {}
+
         for source_col, resolved_col in column_map.items():
             previous_source = destination_sources.get(resolved_col)
-            if previous_source is not None and previous_source != source_col:
+
+            if (
+                previous_source is not None
+                and previous_source != source_col
+            ):
                 raise ValueError(
                     "Transaction remap collision detected: "
-                    f"{previous_source} and {source_col} both resolved to {resolved_col}"
+                    f"{previous_source} and {source_col} "
+                    f"both resolved to {resolved_col}"
                 )
+
             destination_sources[resolved_col] = source_col
 
         remapped_list: List[Dict[str, Any]] = []
+
         for record in transaction_records:
             new_record = dict(record)
 
-            # Collect existing transaction measurement values from record
             data_values: Dict[str, Any] = {}
+
             for col in cls._TRANSACTION_DATA_COLUMNS:
                 if col in record:
                     data_values[col] = record[col]
 
-            # Clear all data_xxx columns in new_record
             for col in cls._TRANSACTION_DATA_COLUMNS:
                 new_record[col] = None
 
-            # Track which source column populated each resolved destination.
             resolved_sources: Dict[str, str] = {}
 
-            # Remap values using column_map (orig_data_col -> resolved_data_col)
             for orig_col, val in data_values.items():
                 if val is not None:
-                    resolved_col = column_map.get(orig_col, orig_col)
+                    resolved_col = column_map.get(
+                        orig_col,
+                        orig_col,
+                    )
 
-                    previous_source = resolved_sources.get(resolved_col)
-                    if previous_source is not None and previous_source != orig_col:
+                    previous_source = resolved_sources.get(
+                        resolved_col
+                    )
+
+                    if (
+                        previous_source is not None
+                        and previous_source != orig_col
+                    ):
                         raise ValueError(
                             "Transaction remap collision detected: "
-                            f"{previous_source} and {orig_col} both resolved to {resolved_col}"
+                            f"{previous_source} and {orig_col} "
+                            f"both resolved to {resolved_col}"
                         )
 
-                    # Never overwrite a non-null measurement originating from
-                    # another source column.
                     if (
                         new_record.get(resolved_col) is not None
                         and resolved_sources.get(resolved_col) != orig_col
@@ -914,10 +1147,6 @@ class MeasurementRepository:
 
         return remapped_list
 
-# =========================================================================
-# ARCHITECTURAL DESIGN: Watch-ID Scoped Transaction Synchronization
-# =========================================================================
-
     def sync_transactions(
         self,
         transaction_records: List[Dict[str, Any]],
@@ -931,58 +1160,97 @@ class MeasurementRepository:
         master_records: Optional[List[Dict[str, Any]]] = None,
         column_map: Optional[Dict[str, str]] = None,
     ) -> int:
-        """Synchronize transaction records so fs3.pre_t_measurement matches the workbook scope.
-
-        Performs full INSERT / UPDATE / DELETE synchronization scoped strictly to transactions
-        belonging to the specified watch_id, preserving historical records from other files/months
-        while allowing deletions of corrected records within the target file.
-        """
+        """Synchronize transaction records so fs3.pre_t_measurement matches the workbook scope."""
         if not isinstance(transaction_records, list):
-            raise TypeError("transaction_records must be a list of dictionaries")
+            raise TypeError(
+                "transaction_records must be a list of dictionaries"
+            )
+
         if not transaction_records:
-            raise ValueError("transaction_records must not be empty")
+            raise ValueError(
+                "transaction_records must not be empty"
+            )
 
         version_value = self._validated_version(version)
-        vpo_code = self._normalize_text(transaction_records[0].get("vpo_code"))
-        if not vpo_code:
-            raise ValueError("vpo_code is required in transaction_records")
 
-        # Resolve active column mapping for remapping workbook-position data columns
+        vpo_code = self._normalize_text(
+            transaction_records[0].get("vpo_code")
+        )
+
+        if not vpo_code:
+            raise ValueError(
+                "vpo_code is required in transaction_records"
+            )
+
         active_column_map: Dict[str, str] = {}
+
         if column_map is not None:
             active_column_map = column_map
+
         elif master_records:
             for idx, m_rec in enumerate(master_records, start=1):
-                orig = m_rec.get("orig_data_column") or f"data_{idx:03d}"
-                res = m_rec.get("data_column") or f"data_{m_rec.get('pi_no', idx):03d}"
+                orig = (
+                    m_rec.get("orig_data_column")
+                    or f"data_{idx:03d}"
+                )
+                res = (
+                    m_rec.get("data_column")
+                    or f"data_{m_rec.get('pi_no', idx):03d}"
+                )
                 active_column_map[orig] = res
-        elif self._last_column_map is not None and self._last_vpo_code == vpo_code:
+
+        elif (
+            self._last_column_map is not None
+            and self._last_vpo_code == vpo_code
+        ):
             active_column_map = self._last_column_map
 
         if active_column_map:
-            transaction_records = self.remap_transaction_records(transaction_records, active_column_map)
+            transaction_records = self.remap_transaction_records(
+                transaction_records,
+                active_column_map,
+            )
 
-        # Normalize incoming records
         prepared_incoming: Dict[tuple, Dict[str, Any]] = {}
+
         for idx, rec in enumerate(transaction_records):
-            rec_vpo = self._normalize_text(rec.get("vpo_code"))
+            rec_vpo = self._normalize_text(
+                rec.get("vpo_code")
+            )
+
             if rec_vpo != vpo_code:
-                raise ValueError("all transaction_records must use the same vpo_code")
+                raise ValueError(
+                    "all transaction_records must use the same vpo_code"
+                )
 
-            dt_val = self._coerce_date(rec.get("date"))
-            serial_last4 = self._normalize_text(rec.get("serial_no_m_last4"))
+            dt_val = self._coerce_date(
+                rec.get("date")
+            )
+
+            serial_last4 = self._normalize_text(
+                rec.get("serial_no_m_last4")
+            )
+
             if dt_val is None:
-                raise ValueError(f"transaction_records[{idx}].date is invalid")
-            if not serial_last4:
-                raise ValueError(f"transaction_records[{idx}].serial_no_m_last4 is required")
+                raise ValueError(
+                    f"transaction_records[{idx}].date is invalid"
+                )
 
-            biz_key = (dt_val, serial_last4)
+            if not serial_last4:
+                raise ValueError(
+                    f"transaction_records[{idx}].serial_no_m_last4 is required"
+                )
+
+            biz_key = (
+                dt_val,
+                serial_last4,
+            )
+
             prepared_incoming[biz_key] = rec
 
         audit_logs: List[Dict[str, Any]] = []
 
         with self.conn.cursor() as cur:
-            # Step 1: Read existing DB transaction rows scoped strictly to watch_id boundary
             select_cols = (
                 [
                     "date",
@@ -1001,35 +1269,67 @@ class MeasurementRepository:
 
             if not watch_id:
                 raise ValueError("watch_id is required")
+
             query_sql = sql.SQL(
-                    """
-                    SELECT {}
-                    FROM fs3.pre_t_measurement
-                    WHERE version = %s
-                      AND vpo_code = %s
-                      AND watch_id = %s;
-                    """
-            ).format(sql.SQL(", ").join(sql.Identifier(col) for col in select_cols))
-            cur.execute(query_sql, (version_value, vpo_code, watch_id))
+                """
+                SELECT {}
+                FROM fs3.pre_t_measurement
+                WHERE version = %s
+                  AND vpo_code = %s
+                  AND watch_id = %s;
+                """
+            ).format(
+                sql.SQL(", ").join(
+                    sql.Identifier(col)
+                    for col in select_cols
+                )
+            )
+
+            cur.execute(
+                query_sql,
+                (
+                    version_value,
+                    vpo_code,
+                    watch_id,
+                ),
+            )
 
             existing_db_rows = cur.fetchall()
 
             existing_db_map: Dict[tuple, Dict[str, Any]] = {}
+
             for row in existing_db_rows:
                 db_dt = self._coerce_date(row[0])
                 db_last4 = row[1]
+
                 if db_dt and db_last4:
-                    row_dict = {col: val for col, val in zip(select_cols, row)}
-                    existing_db_map[(db_dt, db_last4)] = row_dict
+                    row_dict = {
+                        col: val
+                        for col, val in zip(select_cols, row)
+                    }
 
-            incoming_keys: Set[tuple] = set(prepared_incoming.keys())
-            existing_keys: Set[tuple] = set(existing_db_map.keys())
+                    existing_db_map[
+                        (db_dt, db_last4)
+                    ] = row_dict
 
-            # Step 2: Identify TRANSACTION_DELETE (scoped strictly to current watch_id)
+            incoming_keys: Set[tuple] = set(
+                prepared_incoming.keys()
+            )
+
+            existing_keys: Set[tuple] = set(
+                existing_db_map.keys()
+            )
+
             keys_to_delete = existing_keys - incoming_keys
+
             for del_key in keys_to_delete:
                 deleted_rec = existing_db_map[del_key]
-                serial_key = deleted_rec.get("serial_no") or del_key[1]
+
+                serial_key = (
+                    deleted_rec.get("serial_no")
+                    or del_key[1]
+                )
+
                 audit_logs.append({
                     "version": version_value,
                     "watch_id": watch_id,
@@ -1042,23 +1342,40 @@ class MeasurementRepository:
                     "old_value": "EXISTS",
                     "new_value": "DELETED",
                     "change_type": "TRANSACTION_DELETE",
-                    "remarks": "Transaction record removed from source workbook",
+                    "remarks": (
+                        "Transaction record removed "
+                        "from source workbook"
+                    ),
                     "insert_id": insert_id,
                 })
 
-                # Execute physical deletion from fs3.pre_t_measurement
                 del_sql = """
                     DELETE FROM fs3.pre_t_measurement
-                    WHERE version = %s AND vpo_code = %s AND watch_id = %s AND date = %s AND serial_no_m_last4 = %s;
+                    WHERE version = %s
+                      AND vpo_code = %s
+                      AND watch_id = %s
+                      AND date = %s
+                      AND serial_no_m_last4 = %s;
                 """
-                cur.execute(del_sql, (version_value, vpo_code, watch_id, del_key[0], del_key[1]))
 
-            # Step 3: Identify TRANSACTION_INSERT & TRANSACTION_UPDATE
+                cur.execute(
+                    del_sql,
+                    (
+                        version_value,
+                        vpo_code,
+                        watch_id,
+                        del_key[0],
+                        del_key[1],
+                    ),
+                )
+
             for inc_key, inc_rec in prepared_incoming.items():
-                serial_key = inc_rec.get("serial_no") or inc_key[1]
+                serial_key = (
+                    inc_rec.get("serial_no")
+                    or inc_key[1]
+                )
 
                 if inc_key not in existing_keys:
-                    # New Serial Added -> TRANSACTION_INSERT
                     audit_logs.append({
                         "version": version_value,
                         "watch_id": watch_id,
@@ -1071,9 +1388,13 @@ class MeasurementRepository:
                         "old_value": None,
                         "new_value": "INSERTED",
                         "change_type": "TRANSACTION_INSERT",
-                        "remarks": "Transaction record added in source workbook",
+                        "remarks": (
+                            "Transaction record added "
+                            "in source workbook"
+                        ),
                         "insert_id": insert_id,
                     })
+
                     self._upsert_single_transaction(
                         cur,
                         inc_rec,
@@ -1082,18 +1403,27 @@ class MeasurementRepository:
                         watch_id=watch_id,
                         file_version_id=file_version_id,
                     )
+
                 else:
-                    # Serial Exists in Both -> Check for TRANSACTION_UPDATE in data_001..data_500
                     existing_rec = existing_db_map[inc_key]
                     has_changes = False
 
                     for data_col in self._TRANSACTION_DATA_COLUMNS:
-                        old_val = self._normalize_text(existing_rec.get(data_col))
-                        new_val = self._normalize_text(inc_rec.get(data_col))
+                        old_val = self._normalize_text(
+                            existing_rec.get(data_col)
+                        )
+
+                        new_val = self._normalize_text(
+                            inc_rec.get(data_col)
+                        )
 
                         if old_val != new_val:
                             has_changes = True
-                            col_idx = int(data_col.split("_")[1])  # e.g., data_005 -> pi_no 5
+
+                            col_idx = int(
+                                data_col.split("_")[1]
+                            )
+
                             audit_logs.append({
                                 "version": version_value,
                                 "watch_id": watch_id,
@@ -1106,7 +1436,10 @@ class MeasurementRepository:
                                 "old_value": old_val or None,
                                 "new_value": new_val or None,
                                 "change_type": "TRANSACTION_UPDATE",
-                                "remarks": f"Updated transaction value of {data_col}",
+                                "remarks": (
+                                    f"Updated transaction value "
+                                    f"of {data_col}"
+                                ),
                                 "insert_id": insert_id,
                             })
 
@@ -1120,9 +1453,11 @@ class MeasurementRepository:
                             file_version_id=file_version_id,
                         )
 
-            # Step 4: Write all transaction audit log entries
             if audit_logs:
-                self._insert_audit_logs(cur, audit_logs)
+                self._insert_audit_logs(
+                    cur,
+                    audit_logs,
+                )
 
         LOGGER.info(
             f"[TRANSACTION SYNC COMPLETE] "
@@ -1134,6 +1469,7 @@ class MeasurementRepository:
             f"audit_records={len(audit_logs)}",
             pipeline_type="CHECKSHEET",
         )
+
         return len(transaction_records)
 
     def _upsert_single_transaction(
@@ -1148,8 +1484,12 @@ class MeasurementRepository:
         """Internal helper to upsert a single transaction row into fs3.pre_t_measurement."""
         values = dict(transaction_data)
         values["version"] = version_value
+
         if watch_id is not None:
-            values["watch_id"] = self._normalize_nullable_text(watch_id)
+            values["watch_id"] = self._normalize_nullable_text(
+                watch_id
+            )
+
         if file_version_id is not None:
             values["file_version_id"] = file_version_id
 
@@ -1165,22 +1505,35 @@ class MeasurementRepository:
             "serial_no_m_last4",
             "eng_no",
         ):
-            values[key] = self._normalize_nullable_text(values.get(key))
+            values[key] = self._normalize_nullable_text(
+                values.get(key)
+            )
 
         for column in self._TRANSACTION_DATA_COLUMNS:
             value = values.get(column)
+
             if value is not None and not isinstance(value, str):
                 values[column] = str(value)
 
         insert_columns: Sequence[str] = (
-            self._TRANSACTION_BUSINESS_COLUMNS + self._TRANSACTION_DATA_COLUMNS
+            self._TRANSACTION_BUSINESS_COLUMNS
+            + self._TRANSACTION_DATA_COLUMNS
         )
-        params = tuple(values.get(column) for column in insert_columns) + (insert_id, insert_id)
+
+        params = (
+            tuple(
+                values.get(column)
+                for column in insert_columns
+            )
+            + (insert_id, insert_id)
+        )
+
         mutable_columns = [
             column
             for column in insert_columns
             if column not in self._TRANSACTION_CONFLICT_KEYS
         ]
+
         statement = sql.SQL(
             """
             INSERT INTO fs3.pre_t_measurement (
@@ -1188,15 +1541,21 @@ class MeasurementRepository:
             ) VALUES (
                 {}, CURRENT_TIMESTAMP, %s, CURRENT_TIMESTAMP, %s
             )
-            ON CONFLICT (vpo_code, date, serial_no_m_last4)
+            ON CONFLICT (vpo_code, date, serial_no_m_last4,watch_id)
             DO UPDATE SET
                 {},
                 update_date = CURRENT_TIMESTAMP,
                 update_id = EXCLUDED.update_id;
             """
         ).format(
-            sql.SQL(", ").join(sql.Identifier(column) for column in insert_columns),
-            sql.SQL(", ").join(sql.Placeholder() for _ in insert_columns),
+            sql.SQL(", ").join(
+                sql.Identifier(column)
+                for column in insert_columns
+            ),
+            sql.SQL(", ").join(
+                sql.Placeholder()
+                for _ in insert_columns
+            ),
             sql.SQL(",\n                ").join(
                 sql.SQL("{} = EXCLUDED.{}").format(
                     sql.Identifier(column),
@@ -1205,13 +1564,28 @@ class MeasurementRepository:
                 for column in mutable_columns
             ),
         )
-        cur.execute(statement, params)
 
-    def insert_transaction(self, transaction_data: Mapping[str, Any]) -> None:
+        cur.execute(
+            statement,
+            params,
+        )
+
+    def insert_transaction(
+        self,
+        transaction_data: Mapping[str, Any],
+    ) -> None:
         """Legacy helper retained for compatibility."""
-        version_value = self._validated_version(transaction_data.get("version"))
+        version_value = self._validated_version(
+            transaction_data.get("version")
+        )
+
         with self.conn.cursor() as cur:
-            self._upsert_single_transaction(cur, transaction_data, version_value, "Vig")
+            self._upsert_single_transaction(
+                cur,
+                transaction_data,
+                version_value,
+                "Vig",
+            )
 
 
 __all__ = ["MeasurementRepository"]

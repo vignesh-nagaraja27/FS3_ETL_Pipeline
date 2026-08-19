@@ -10,7 +10,7 @@ This step does NOT write to the database. It only produces validated,
 cleaned data structures in memory. This separation keeps each step testable
 in isolation.
 
-Parser settings like 'header_row', 'data_start_row',2'value_column_idx', and 'excel_sheet_index'3come from machine_config["parser"].
+Parser settings like 'header_row', 'data_start_row', 'value_column_idx', and 'excel_sheet_index' come from machine_config["parser"].
 """
 
 import math
@@ -25,7 +25,7 @@ from utils.logger import LOGGER
 class TransformStep:
     """
     Parses a raw measurement file into a list of clean row dictionaries.
-    Supports both CSV and Excel file formats as specified in2machine_config["parser"].
+    Supports both CSV and Excel file formats as specified in machine_config["parser"].
     """
 
     # OPTIONAL_FIELD_ALIASES removed — rely on parser positional indexes or exact headers
@@ -37,15 +37,17 @@ class TransformStep:
         machine_config: dict,
         machine_id: str,
         log_id: int,
+        pipeline_type: str,
     ) -> List[Dict[str, Any]]:
         """
         Reads and transforms a file into a list of measurement row dicts.
 
         Args:
             file_path (Path): Path to the file in the processing folder.
-            part_config (dict):2    Classification metadata returned by Dispatcher from fs3.pre_m_file_pattern.
+            part_config (dict): Classification metadata returned by Dispatcher from fs3.pre_m_file_pattern.
             machine_id (str): Machine identifier for log context.
             log_id (int): The pipeline run log ID for correlation.
+            pipeline_type (str): Operational category ('3D_HD', '3D_BL', etc.).
 
         Returns:
             List[Dict]: Each dict represents one measurement row with keys
@@ -63,6 +65,7 @@ class TransformStep:
             model=vehicle_model or "Unknown",
             part=parts_code or "Unknown",
             op=op_no or "Unknown",
+            pipeline_type=pipeline_type,
         )
 
         parser = machine_config.get("parser", {})
@@ -110,7 +113,8 @@ class TransformStep:
                     f"[LOG_ID:{log_id}] LAYOUT OVERRIDE APPLIED "
                     f"pattern='{pattern}' "
                     f"header_row={header_row} "
-                    f"data_start_row={data_start_row}"
+                    f"data_start_row={data_start_row}",
+                    **context,
                 )
                 break
         LOGGER.info(
@@ -502,14 +506,6 @@ class TransformStep:
             col.strip() if isinstance(col, str) else col for col in df.columns
         ]
 
-        # Capture the header label for the measurement value column so we
-        # can use it as a source for `measure_position` when the row cell is missing.
-        # value_col_header = None
-        # try:
-        #     value_col_header = df.columns[value_col_idx]
-        # except Exception:
-        #     value_col_header = None
-
         rows = []
         skipped = 0
 
@@ -568,22 +564,7 @@ class TransformStep:
                     measure_item = self._get_optional_string(row, "measure_item")
 
                 # HD files do not contain measure_position.
-                # BL logic will be implemented later from filename.
                 measure_position = None
-
-                # If measure_position is still missing, try to use the header
-                # label for the measurement value column (this is source data).
-                # if not measure_position and value_col_header is not None:
-                #     try:
-                #         header_lbl = (
-                #             value_col_header.strip()
-                #             if isinstance(value_col_header, str)
-                #             else str(value_col_header)
-                #         )
-                #         if header_lbl != "" and header_lbl.lower() != "nan":
-                #             measure_position = header_lbl
-                #     except Exception:
-                #         pass
 
                 # Prefer positional extraction when parser provides explicit indexes
                 if isinstance(spec_col_idx, int):
@@ -688,7 +669,7 @@ class TransformStep:
             try:
                 evaluation_item1_raw = self._get_optional_string_by_pos(row, 0)
                 # KTS-7106 business rule:
-                # # only rows with evaluation item are valid measurement rows
+                # only rows with evaluation item are valid measurement rows
                 if not evaluation_item1_raw:
                     continue
                 specification = self._get_optional_string_by_pos(row, 2)
@@ -768,16 +749,6 @@ class TransformStep:
 
         excluded_evaluation_items = set(parser.get("excluded_evaluation_items", []))
         rows = []
-        #
-        # Always keep the LAST "----------" line encountered.
-        # Example:
-        #
-        # ----------[基準] 両ｾﾝﾀ/1CW基準面/Rrﾌﾗﾝｼﾞ端面
-        # ---------- op60 #1P～#4P ﾋﾟﾝ位置度 ※両ｾﾝﾀ-1CW基準
-        #
-        # Then 6021 inherits:
-        # op60 #1P～#4P ﾋﾟﾝ位置度 ※両ｾﾝﾀ-1CW基準
-        #
         current_reference_position = None
         with open(
             file_path,
@@ -804,8 +775,7 @@ class TransformStep:
                     continue
 
                 cols = [c.strip() for c in line.split(",")]
-                # Business rule:
-                # Measurement rows MUST have H column
+                # Business rule: Measurement rows MUST have H column
                 if len(cols) < 8:
                     continue
                 try:
@@ -907,8 +877,6 @@ class TransformStep:
             if isinstance(col, str) and col.strip().lower() == lower_key:
                 return row.get(col)
 
-        # Alias lookup removed — only exact header matches are considered now
-
         return None
 
     def _get_optional_string_by_pos(self, row: pd.Series, idx: int) -> Optional[str]:
@@ -939,7 +907,6 @@ class TransformStep:
         value = self._get_optional_value(row, key)
         if value is None:
             return None
-        # Treat pandas NA/NaN and literal 'nan' as missing
         if pd.isna(value):
             return None
         text = str(value).strip()
@@ -959,13 +926,6 @@ class TransformStep:
     def _derive_specification_limits_from_row(
         self, row: pd.Series, value_col_idx: int
     ) -> Dict[str, Optional[Any]]:
-        """
-        Derive specification / upper_limit / lower_limit from positional columns
-        when the source file does not expose canonical header labels.
-
-        For many CMM CSV layouts, the measurement value is located three columns
-        after the spec/upper/lower set. This helper attempts that fallback.
-        """
         result: Dict[str, Optional[Any]] = {
             "specification": None,
             "upper_limit": None,

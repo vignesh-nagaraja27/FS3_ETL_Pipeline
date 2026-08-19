@@ -113,10 +113,15 @@ class StructuredLogger:
             return self.master_loggers["SYSTEM"]
 
         if pipeline_name == "UNKNOWN":
+            import traceback
+
             self.master_loggers["SYSTEM"].warning(
-                "[LOGGER ROUTING WARNING] Missing pipeline_type detected. "
-                "Log routed to etl_pipeline_master.log."
+                "\n[UNKNOWN LOGGER DETECTED]\n"
+                f"pipeline_type={pipeline_type}\n"
+                f"category={category}\n"
+                + "".join(traceback.format_stack(limit=12))
             )
+
         return self.master_loggers["UNKNOWN"]
 
     def _format_context(
@@ -301,6 +306,20 @@ class StructuredLogger:
         source_filename: Optional[str] = None,
     ):
         pipeline_name = self._resolve_pipeline_type(pipeline_type, category)
+
+        if pipeline_name == "UNKNOWN":
+            import traceback
+
+            self.master_loggers["SYSTEM"].warning(
+                "\n[UNKNOWN LOGGER DETECTED]\n"
+                f"pipeline_type={pipeline_type}\n"
+                f"category={category}\n"
+                f"machine={machine}\n"
+                f"model={model}\n"
+                f"part={part}\n"
+                f"op={op}\n"
+                + "".join(traceback.format_stack(limit=12))
+            )
 
         # STRICT ARCHITECTURAL RULE:
         # System/Infrastructure logs write ONLY to etl_system_master.log

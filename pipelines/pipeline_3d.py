@@ -55,7 +55,17 @@ class Pipeline3D:
         op_no = str(part_config.get("op_no") or "UNKNOWN")
 
         context = dict(
-            machine=machine_id, model=vehicle_model, part=parts_code, op=op_no,pipeline_type=pipeline_type,
+            machine=machine_id,
+            model=vehicle_model,
+            part=parts_code,
+            op=op_no,
+            pipeline_type=pipeline_type,
+        )
+        status_context = dict(
+            machine=machine_id,
+            model=vehicle_model,
+            part=parts_code,
+            op=op_no,
         )
 
         processing_path: Optional[Path] = None
@@ -74,7 +84,7 @@ class Pipeline3D:
         # ── REGISTRATION / CLAIM ──────────────────────────────────────────────
         if existing_log_id is not None:
             log_id = existing_log_id
-            self._status.reset_for_retry(log_id, **context)
+            self._status.reset_for_retry(log_id, **status_context)
             LOGGER.info(
                 f"[LOG_ID:{log_id}] DLQ RETRY: Reusing existing log entry for '{source_path.name}'.",
                 **context,
@@ -108,7 +118,7 @@ class Pipeline3D:
 
         # ── STEP 1: COPY (Staging) ────────────────────────────────────────────
         try:
-            self._status.set_processing(log_id, "COPY", **context)
+            self._status.set_processing(log_id, "COPY", **status_context)
             processing_path = self._copy_step.run(
                 source_path=source_path,
                 processing_path=processing_dir,
@@ -116,6 +126,7 @@ class Pipeline3D:
                 vehicle_model=vehicle_model,
                 parts_code=parts_code,
                 op_no=op_no,
+                pipeline_type=pipeline_type,
                 stable_wait_sec=float(machine_config.get("stable_wait_sec", 2.0)),
                 stable_required_count=int(
                     machine_config.get("stable_required_count", 3)
@@ -154,13 +165,14 @@ class Pipeline3D:
 
         # ── STEP 2: TRANSFORM ─────────────────────────────────────────────────
         try:
-            self._status.set_processing(log_id, "TRANSFORM", **context)
+            self._status.set_processing(log_id, "TRANSFORM", **status_context)
             rows = self._transform_step.run(
                 file_path=processing_path,
                 part_config=part_config,
                 machine_config=machine_config,
                 machine_id=machine_id,
                 log_id=log_id,
+                pipeline_type=pipeline_type,
             )
         except Exception as e:
             LOGGER.error(
@@ -189,7 +201,7 @@ class Pipeline3D:
 
         # ── STEP 3: LOAD ──────────────────────────────────────────────────────
         try:
-            self._status.set_processing(log_id, "LOAD", **context)
+            self._status.set_processing(log_id, "LOAD", **status_context)
             load_step = LoadStep(pipeline_type=pipeline_type)
             version = str(machine_config.get("version", "")).strip()
             if not version:
@@ -234,8 +246,8 @@ class Pipeline3D:
 
         # ── STEP 4: FINALIZE ─────────────────────────────────────────────────
         try:
-            self._status.set_processing(log_id, "FINALIZE", **context)
-            self._status.set_completed(log_id, **context)
+            self._status.set_processing(log_id, "FINALIZE", **status_context)
+            self._status.set_completed(log_id, **status_context)
             self._finalize_step.run_success(
                 source_path,
                 processing_path or Path(""),

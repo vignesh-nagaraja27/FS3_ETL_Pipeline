@@ -119,6 +119,7 @@ class LoadStep:
             model=vehicle_model or "",
             part=parts_code or "",
             op=op_no or "",
+            pipeline_type=self._pipeline_type,
         )
 
         # Version is now strictly provided from the machine config/caller

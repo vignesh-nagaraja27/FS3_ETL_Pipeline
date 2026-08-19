@@ -8,23 +8,25 @@ Architecture Principles:
    Any serial row present in the database but removed from the source workbook is
    automatically deleted from fs3.pre_t_measurement.
 
-2. Full Audit Traceability:
+2. Master Synchronization & Limit Ownership:
+   Master synchronization (sync_masters) owns PI_NO business resolution, master definition
+   upserts, and limit-update evaluations using transaction business date precedence.
+
+3. Full Audit Traceability:
    Forwards watch_id, file_version_id, file_name, and file_hash down to
-   MeasurementRepository.sync_transactions(), generating TRANSACTION_INSERT,
-   TRANSACTION_UPDATE, and TRANSACTION_DELETE records in fs3.pre_cs_measurement_change_log.
+   MeasurementRepository methods, generating MASTER_INSERT, MASTER_UPDATE, LIMIT_UPDATE,
+   TRANSACTION_INSERT, TRANSACTION_UPDATE, and TRANSACTION_DELETE audit records in
+   fs3.pre_cs_measurement_change_log.
 """
 
 from __future__ import annotations
 
 import hashlib
-import logging
 from datetime import date, datetime
 from typing import Any, Dict, List, Mapping, Optional
 
 from repositories.file_version_repository import FileVersionRepository
 from repositories.measurement_repository import MeasurementRepository
-
-
 from utils.logger import LOGGER
 
 VALID_DATA_COLUMNS = frozenset(f"data_{number:03d}" for number in range(1, 501))
@@ -64,6 +66,8 @@ class LoadChecksheetStep:
             raise ValueError("parts_code is required")
         if not op_no:
             raise ValueError("op_no is required")
+        if not watch_id:
+            raise ValueError("watch_id is required")
         if not file_hash:
             raise ValueError("file_hash is required")
 
@@ -85,24 +89,6 @@ class LoadChecksheetStep:
         self._validate_transaction_records(transaction_records, expected_vpo_code)
         incoming_file_date = self._max_transaction_date(transaction_records)
 
-        LOGGER.info(
-"[LOAD START] Starting checksheet load: "
-"vehicle_model=%s, parts_code=%s, op_no=%s, masters=%s, transactions=%s"
-% (
-vehicle_model,
-parts_code,
-op_no,
-len(master_records),
-len(transaction_records),
-),
-pipeline_type="CHECKSHEET",
-watch_id=watch_id,
-source_filename=file_name,
-model=vehicle_model,
-part=parts_code,
-op=op_no,
-)
-
         lock_key = self._lock_key(vehicle_model, parts_code, op_no)
         with conn.cursor() as cur:
             cur.execute("SELECT pg_advisory_xact_lock(%s);", (lock_key,))
@@ -112,71 +98,30 @@ op=op_no,
 
         measurement_repository = MeasurementRepository(conn)
 
-        pi_no_map: Dict[str, int] = {
-            master_record["data_column"]: index
-            for index, master_record in enumerate(master_records, start=1)
-        }
-        LOGGER.info(
-f"[PI_NO MAP] Created deterministic PI_NO map: {pi_no_map}",
-pipeline_type="CHECKSHEET",
-watch_id=watch_id,
-source_filename=file_name,
-model=vehicle_model,
-part=parts_code,
-op=op_no,
-)
-
-        # Limits must be evaluated before master synchronization. Existing
-        # update_date is the comparison source; synchronization preserves the
-        # resulting limits for existing positions and inserts limits for new ones.
-        for master_record in master_records:
-            data_column = master_record["data_column"]
-            pi_no = pi_no_map[data_column]
-            limits_updated = measurement_repository.update_limits_if_newer(
-                pi_no=pi_no,
-                incoming_date=incoming_file_date,
-                upper_limit=master_record.get("upper_limit"),
-                lower_limit=master_record.get("lower_limit"),
-                version=self.CHECKSHEET_VERSION,
-                vpo_code=master_record["vpo_code"],
-                watch_id=watch_id,
-                file_version_id=file_version_id,
-                file_name=file_name,
-                file_hash=file_hash,
-            )
-            LOGGER.info(
-"[LIMIT UPDATE] Evaluated limit update: "
-f"data_column={data_column}, "
-f"pi_no={pi_no}, "
-f"updated={limits_updated}, "
-f"incoming_file_date={incoming_file_date}",
-pipeline_type="CHECKSHEET",
-watch_id=watch_id,
-source_filename=file_name,
-model=vehicle_model,
-part=parts_code,
-op=op_no,
-)
-
-        # Master Synchronization with Master Audit Logging
-        measurement_repository.sync_masters(
+        # Master synchronization owns limit-update processing.
+        # Limits are evaluated after PI_NO resolution using
+        # business-date precedence derived from
+        # fs3.pre_t_measurement MAX(date) scoped by:
+        # version + vpo_code + watch_id.
+        column_map = measurement_repository.sync_masters(
             master_records,
             version=self.CHECKSHEET_VERSION,
             watch_id=watch_id,
             file_version_id=file_version_id,
             file_name=file_name,
             file_hash=file_hash,
+            incoming_file_date=incoming_file_date,
         )
         LOGGER.info(
-f"[PI_NO RESOLVED] Synchronized "
-f"{len(master_records)} positional master definitions",
-pipeline_type="CHECKSHEET",
-watch_id=watch_id,
-source_filename=file_name,
-model=vehicle_model,
-part=parts_code,
-op=op_no,
-)
+            f"[PI_NO RESOLVED] Synchronized {len(master_records)} master definitions "
+            f"and resolved column map: {column_map}",
+            pipeline_type="CHECKSHEET",
+            watch_id=watch_id,
+            source_filename=file_name,
+            model=vehicle_model,
+            part=parts_code,
+            op=op_no,
+        )
 
         # Prepare transaction records with vehicle/parts/op context
         prepared_transaction_records = []
@@ -195,43 +140,40 @@ op=op_no,
             file_version_id=file_version_id,
             file_name=file_name,
             file_hash=file_hash,
+            column_map=column_map,
         )
         LOGGER.info(
-f"[TRANSACTION SYNC] Synchronized "
-f"{synced_count} transaction records "
-f"for vpo_code={expected_vpo_code}",
-pipeline_type="CHECKSHEET",
-watch_id=watch_id,
-source_filename=file_name,
-model=vehicle_model,
-part=parts_code,
-op=op_no,
-)
+            f"[TRANSACTION SYNC] Synchronized {synced_count} transaction records "
+            f"for vpo_code={expected_vpo_code}",
+            pipeline_type="CHECKSHEET",
+            watch_id=watch_id,
+            source_filename=file_name,
+            model=vehicle_model,
+            part=parts_code,
+            op=op_no,
+        )
 
         file_version_repository.mark_processed(file_hash)
         LOGGER.info(
-f"[FILE VERSION UPDATE] Updated file version: "
-f"file_hash={file_hash}, status=PROCESSED",
-pipeline_type="CHECKSHEET",
-watch_id=watch_id,
-source_filename=file_name,
-model=vehicle_model,
-part=parts_code,
-op=op_no,
-)
+            f"[FILE VERSION UPDATE] Updated file version: file_hash={file_hash}, status=PROCESSED",
+            pipeline_type="CHECKSHEET",
+            watch_id=watch_id,
+            source_filename=file_name,
+            model=vehicle_model,
+            part=parts_code,
+            op=op_no,
+        )
 
         LOGGER.info(
-f"[LOAD COMPLETED] Completed checksheet load: "
-f"masters={len(master_records)}, "
-f"transactions={synced_count}, "
-f"incoming_file_date={incoming_file_date}",
-pipeline_type="CHECKSHEET",
-watch_id=watch_id,
-source_filename=file_name,
-model=vehicle_model,
-part=parts_code,
-op=op_no,
-)
+            f"[LOAD COMPLETED] Completed checksheet load: masters={len(master_records)}, "
+            f"transactions={synced_count}, incoming_file_date={incoming_file_date}",
+            pipeline_type="CHECKSHEET",
+            watch_id=watch_id,
+            source_filename=file_name,
+            model=vehicle_model,
+            part=parts_code,
+            op=op_no,
+        )
         return synced_count
 
     load = run
@@ -264,8 +206,7 @@ op=op_no,
         for index, master_record in enumerate(master_records, start=1):
             if master_record.get("version") != cls.CHECKSHEET_VERSION:
                 raise ValueError(
-                    f"master_records[{index - 1}].version must be "
-                    f"{cls.CHECKSHEET_VERSION!r}"
+                    f"master_records[{index - 1}].version must be {cls.CHECKSHEET_VERSION!r}"
                 )
             if master_record.get("vpo_code") != expected_vpo_code:
                 raise ValueError(
@@ -281,8 +222,7 @@ op=op_no,
                 if master_record.get(field_name) != expected_value:
                     raise ValueError(
                         f"master_records[{index - 1}].{field_name} mismatch: "
-                        f"expected {expected_value!r}, got "
-                        f"{master_record.get(field_name)!r}"
+                        f"expected {expected_value!r}, got {master_record.get(field_name)!r}"
                     )
 
             expected_data_column = f"data_{index:03d}"
@@ -303,8 +243,7 @@ op=op_no,
         for index, transaction_record in enumerate(transaction_records):
             if transaction_record.get("version") != cls.CHECKSHEET_VERSION:
                 raise ValueError(
-                    f"transaction_records[{index}].version must be "
-                    f"{cls.CHECKSHEET_VERSION!r}"
+                    f"transaction_records[{index}].version must be {cls.CHECKSHEET_VERSION!r}"
                 )
             if transaction_record.get("vpo_code") != expected_vpo_code:
                 raise ValueError(
@@ -312,9 +251,7 @@ op=op_no,
                     f"{expected_vpo_code!r}, got {transaction_record.get('vpo_code')!r}"
                 )
             if not transaction_record.get("serial_no_m_last4"):
-                raise ValueError(
-                    f"transaction_records[{index}].serial_no_m_last4 is required"
-                )
+                raise ValueError(f"transaction_records[{index}].serial_no_m_last4 is required")
             if transaction_record.get("date") is None:
                 raise ValueError(f"transaction_records[{index}].date is required")
 

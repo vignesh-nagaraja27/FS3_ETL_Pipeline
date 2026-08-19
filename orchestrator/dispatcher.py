@@ -52,6 +52,14 @@ class Dispatcher:
         """
         self._config = config
         self._file_pattern_repo = FilePatternRepository()
+    def classify_from_watcher(self,file_path: Path,watch_config: dict,):
+        pipeline_type = str(watch_config.get("pipeline_type", "")).strip()
+        if pipeline_type in (PIPELINE_3D_HD,PIPELINE_3D_BL,PIPELINE_3D_CR,):
+            match_3d = self._file_pattern_repo.find_match(file_path.name)
+            return pipeline_type, match_3d
+        if pipeline_type == PIPELINE_CHECKSHEET:
+            return self.classify(file_path)
+        return self.classify(file_path)
 
     def dispatch(self, pipeline_type: str, **kwargs):
         """Instantiate the pipeline for the selected pipeline type."""
@@ -85,7 +93,7 @@ class Dispatcher:
           - matched_config (dict or None): The matched config block.
 
         Usage in job_runner:
-            pipeline_type, part_config = dispatcher.classify(file_path)
+            pipeline_type, part_config = dispatcher.classify_from_watcher(file_path=file_path,watch_config=watch_config,)
             if pipeline_type == PIPELINE_UNKNOWN:
                 # Log a warning and skip
             else:
