@@ -43,7 +43,7 @@
             "poll_interval_sec": 2,
             "stable_wait_sec": 10,
             "stable_required_count": 3,
-            "max_workers": 2,
+            "max_workers": 4,
             "enabled": true
         },
         {
@@ -57,7 +57,7 @@
             "poll_interval_sec": 2,
             "stable_wait_sec": 10,
             "stable_required_count": 3,
-            "max_workers": 2,
+            "max_workers": 4,
             "enabled": true
         },
         {
@@ -71,7 +71,7 @@
             "poll_interval_sec": 2,
             "stable_wait_sec": 10,
             "stable_required_count": 3,
-            "max_workers": 2,
+            "max_workers": 4,
             "enabled": true
         },
         {
@@ -90,6 +90,6 @@
         }
     ],
     "destination_root": {
-        "path": "C:/FS3/DataCollect/10_品質/01_データシート/UAT_test"
+        "path": "C:/FS3/DataCollect/10_品質/01_データシート"
     }
 }

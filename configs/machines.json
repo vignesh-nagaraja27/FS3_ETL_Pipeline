@@ -37,7 +37,7 @@
     {
       "machine_id": "KTS-7106",
       "description": "Mitutoyo CMM -  Produces 3次元 BL GT3,RC,ENR  measurement files.",
-      "source_path": "C:\\FS3\\CMM\\Mitutoyo\\KTS-7106",
+      "source_path": "C:\\CMM\\Mitutoyo\\KTS-7106",
       "parser": {
         "file_type": "excel",
         "header_row": null,
@@ -64,7 +64,7 @@
     {
       "machine_id": "KTS-7898",
       "description": "Mitutoyo CMM - Produces 3次元 CR measurement files.",
-      "source_path": "C:\\FS3\\CMM\\Mitutoyo\\KTS-7898\\CSV",
+      "source_path": "C:\\CMM\\Mitutoyo\\KTS-7898\\CSV",
       "parser": {
         "file_type": "csv",
         "encoding": "shift_jis",
