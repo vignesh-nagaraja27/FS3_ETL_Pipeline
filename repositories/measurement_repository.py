@@ -223,6 +223,9 @@ class MeasurementRepository:
         """Find a PI number by the historical measurement business identity."""
         direction = self._normalize_text(record_data.get("measure_direction"))
         depth = self._normalize_text(record_data.get("measure_depth"))
+        machining_surface = self._normalize_nullable_text(
+            record_data.get("machining_surface")
+        )
         common_params = (
             version,
             self._normalize_text(record_data.get("vpo_code")),
@@ -240,12 +243,14 @@ class MeasurementRepository:
                   AND op_name = %s
                   AND measure_item = %s
                   AND measure_point = %s
+                  AND machining_surface IS NOT DISTINCT FROM %s
                   AND measure_direction IS NOT DISTINCT FROM %s
                   AND specification IS NOT DISTINCT FROM %s
                 ORDER BY pi_no
                 LIMIT 1;
             """
             params = common_params + (
+                machining_surface,
                 direction,
                 self._normalize_nullable_text(record_data.get("specification")),
             )
@@ -258,12 +263,14 @@ class MeasurementRepository:
                   AND op_name = %s
                   AND measure_item = %s
                   AND measure_point = %s
+                  AND machining_surface IS NOT DISTINCT FROM %s
                   AND measure_depth IS NOT DISTINCT FROM %s
                   AND specification IS NOT DISTINCT FROM %s
                 ORDER BY pi_no
                 LIMIT 1;
             """
             params = common_params + (
+                machining_surface,
                 depth or None,
                 self._normalize_nullable_text(record_data.get("specification")),
             )
@@ -407,7 +414,7 @@ class MeasurementRepository:
         """Update limits and generate LIMIT_UPDATE audit records using date precedence.
 
         Authoritative business precedence date is MAX(fs3.pre_t_measurement.date).
-        Limits are updated only if existing_business_date is NULL or incoming_date > existing_business_date.
+        Limits are updated only if existing_business_date is NULL or or incoming_date >= existing_business_date.
         `pre_m_measurement.update_date` is NEVER used to establish business precedence.
         """
         version_value = self._validated_version(version)
@@ -430,9 +437,9 @@ class MeasurementRepository:
                 cur=cursor,
             )
 
-            # STRICT > comparison rule:
-            # If existing_business_date is present, incoming_value MUST be strictly greater.
-            if existing_business_date is not None and incoming_value <= existing_business_date:
+            # Skip only if the incoming file is older than the latest business date.
+            # Same-date corrections are allowed.
+            if existing_business_date is not None and incoming_value < existing_business_date:
                 LOGGER.info(
                     f"[LIMIT SKIP] PI_NO={pi_no} "
                     f"incoming_date={incoming_value!r} <= existing_business_date={existing_business_date!r}",
@@ -789,6 +796,12 @@ class MeasurementRepository:
                     rec_point = self._normalize_text(
                         master_record.get("measure_point")
                     )
+                    rec_surface = self._normalize_nullable_text(
+                        master_record.get("machining_surface")
+                    )
+                    rec_spec = self._normalize_nullable_text(
+                        master_record.get("specification")
+                    )
                     rec_dir = self._normalize_text(
                         master_record.get("measure_direction")
                     )
@@ -812,6 +825,12 @@ class MeasurementRepository:
                         ex_point = self._normalize_text(
                             ex_fields.get("measure_point")
                         )
+                        ex_surface = self._normalize_nullable_text(
+                            ex_fields.get("machining_surface")
+                        )
+                        ex_spec = self._normalize_nullable_text(
+                            ex_fields.get("specification")
+                        )
                         ex_dir = self._normalize_text(
                             ex_fields.get("measure_direction")
                         )
@@ -824,6 +843,8 @@ class MeasurementRepository:
                             and rec_inspection_no == ex_inspection_no
                             and rec_item == ex_item
                             and rec_point == ex_point
+                            and rec_surface == ex_surface
+                            and rec_spec == ex_spec
                             and rec_dir == ex_dir
                             and rec_depth == ex_depth
                         ):

@@ -35,6 +35,7 @@ from repositories.processing_lock_repository import ProcessingLockRepository
 from state.status_manager import StatusManager
 from steps.load_checksheet import LoadChecksheetStep
 from steps.transform_checksheet import TransformChecksheetStep
+from steps.transform_checksheet_blhd import TransformChecksheetBLHDStep
 from utils.file_hash import generate_sha256
 from utils.logger import LOGGER
 from utils.path_helper import get_checksheet_paths
@@ -61,7 +62,8 @@ class ChecksheetPipeline:
         self._destination_root = Path(destination_root or Path.cwd())
         self._status = StatusManager()
         self._db = DatabaseHandler()
-        self._transform_step = TransformChecksheetStep()
+        self._cr_transform_step = TransformChecksheetStep()
+        self._blhd_transform_step = TransformChecksheetBLHDStep()
         self._load_step = LoadChecksheetStep()
 
     def run(
@@ -300,12 +302,24 @@ class ChecksheetPipeline:
                         part=parts_code,
                         op=op_no,
                     )
-                    transformed_records = self._transform_step.run(
+                    if parts_code.upper() in {"BL", "HD"}:
+                        transform_step = self._blhd_transform_step
+                        LOGGER.info("[TRANSFORM ROUTING] Using BL/HD transformer",**context)
+                    else:
+                        transform_step = self._cr_transform_step
+                        LOGGER.info("[TRANSFORM ROUTING] Using CR transformer",**context)
+                    transformed_records = transform_step.run(
                         source,
                         vehicle_model=vehicle_model,
                         parts_code=parts_code,
                         op_no=op_no,
                     )
+                    LOGGER.info(
+f"[TRANSFORM RESULT] "
+f"master_records={len(transformed_records.get('master_records', []))} "
+f"transaction_records={len(transformed_records.get('transaction_records', []))}",
+**context,
+)
 
                     failed_step = "LOAD"
                     self._status.set_processing(
