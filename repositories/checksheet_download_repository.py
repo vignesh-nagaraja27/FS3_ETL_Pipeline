@@ -62,11 +62,27 @@ class ChecksheetDownloadRepository:
     def _extract_filename_parts(file_name: str) -> Dict[str, str]:
         stem = Path(file_name).stem
         match = re.fullmatch(
-            r"(?P<vehicle_model>[^_]+)_(?P<parts_code>[^_]+)_(?P<op_no>OP[^_]+)(?:_.+)?",
+            r"(?P<vehicle_model>[^_]+)_(?P<parts_code>[^_]+)_(?P<op_no>[^_]+)(?:_.+)?",
             stem,
             flags=re.IGNORECASE,
         )
         if match is None:
+            raise ValueError(
+                "Checksheet filename must match VehicleModel_PartsCode_OPNO_Anything.xlsm"
+            )
+        for group_name, segment_name in (
+            ("vehicle_model", "VehicleModel"),
+            ("parts_code", "PartsCode"),
+            ("op_no", "OPNO"),
+        ):
+            value = match.group(group_name)
+            if re.fullmatch(r"[A-Za-z0-9]+", value) is None:
+                raise ValueError(
+                    f"Invalid checksheet filename segment '{segment_name}': "
+                    f"value '{value}' in filename '{file_name}' must contain "
+                    "only A-Z, a-z, and 0-9"
+                )
+        if not match.group("op_no").upper().startswith("OP"):
             raise ValueError(
                 "Checksheet filename must match VehicleModel_PartsCode_OPNO_Anything.xlsm"
             )

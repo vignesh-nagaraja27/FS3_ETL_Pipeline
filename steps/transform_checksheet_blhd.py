@@ -748,11 +748,28 @@ class TransformChecksheetBLHDStep:
         match = re.fullmatch(
             r"(?P<vehicle_model>[^_]+)_"
             r"(?P<parts_code>[^_]+)_"
-            r"(?P<op_no>OP[^_]+)(?:_.+)?",
+            r"(?P<op_no>[^_]+)(?:_.+)?",
             stem,
             flags=re.IGNORECASE,
         )
         if match is None:
+            raise ValueError(
+                "Checksheet filename must match "
+                "VehicleModel_PartsCode_OPNO_Anything.xlsx"
+            )
+        for group_name, segment_name in (
+            ("vehicle_model", "VehicleModel"),
+            ("parts_code", "PartsCode"),
+            ("op_no", "OPNO"),
+        ):
+            value = match.group(group_name)
+            if re.fullmatch(r"[A-Za-z0-9]+", value) is None:
+                raise ValueError(
+                    f"Invalid checksheet filename segment '{segment_name}': "
+                    f"value '{value}' in filename '{file_name}' must contain "
+                    "only A-Z, a-z, and 0-9"
+                )
+        if not match.group("op_no").upper().startswith("OP"):
             raise ValueError(
                 "Checksheet filename must match "
                 "VehicleModel_PartsCode_OPNO_Anything.xlsx"

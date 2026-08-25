@@ -34,7 +34,7 @@
     "watch_directories": [
         {
             "watch_id": "GT3_CR_DEC2025",
-            "source_path": "C:\\Users\\MyUser\\OneDrive - トヨタ自動車株式会社\\FS3情報共有 (25年~) - 10_6_軸物共有\\★測定ﾃﾞｰﾀ（ﾏｽﾀｰ）\\03.RC・GT3_LO\\2025.12.22～GT3号口\\GT3データシート",
+            "source_path": "C:\\Users\\z627973\\OneDrive - トヨタ自動車株式会社\\CS_TEST\\GT3_BL_号口\\OP010_OP10",
             "pipeline_type": "CHECKSHEET",
             "version": "00000000",
             "change_check_interval_minutes": 5,
@@ -48,7 +48,7 @@
         },
         {
             "watch_id": "GT3_CR_APRIL2026",
-            "source_path": "C:\\Users\\MyUser\\OneDrive - トヨタ自動車株式会社\\FS3情報共有 (25年~) - 10_6_軸物共有\\★測定ﾃﾞｰﾀ（ﾏｽﾀｰ）\\03.RC・GT3_LO\\2026.4.27～GT3号口\\GT3データシート",
+            "source_path": "C:\\Users\\z627973\\OneDrive - トヨタ自動車株式会社\\CR",
             "pipeline_type": "CHECKSHEET",
             "version": "00000000",
             "change_check_interval_minutes": 5,
@@ -62,7 +62,7 @@
         },
         {
             "watch_id": "RC_CR_MAY2026",
-            "source_path": "C:\\Users\\MyUser\\OneDrive - トヨタ自動車株式会社\\FS3情報共有 (25年~) - 10_6_軸物共有\\★測定ﾃﾞｰﾀ（ﾏｽﾀｰ）\\03.RC・GT3_LO\\2026.5～RC試作\\RCデータシート",
+            "source_path": "C:\\Users\\z627973\\OneDrive - トヨタ自動車株式会社\\GT3_CR",
             "pipeline_type": "CHECKSHEET",
             "version": "00000000",
             "change_check_interval_minutes": 5,
@@ -86,7 +86,7 @@
             "stable_wait_sec": 10,
             "stable_required_count": 3,
             "max_workers": 2,
-            "enabled": true
+            "enabled": false
         }
     ],
     "destination_root": {

@@ -92,7 +92,7 @@ class ChecksheetPipeline:
             raise FileNotFoundError(f"Source workbook not found: {source}")
 
         config = watch_config or {}
-        filename_parts = self._extract_filename_parts(source.name)
+        filename_parts = self._extract_filename_parts(source.name, validate=False)
         vehicle_model = filename_parts["vehicle_model"]
         parts_code = filename_parts["parts_code"]
         op_no = filename_parts["op_no"]
@@ -144,10 +144,12 @@ class ChecksheetPipeline:
         file_version_id: Optional[int] = None
         archive_path: Optional[Path] = None
         database_connection: Any = None
-        failed_step = "STABILITY"
+        failed_step = "FILENAME_VALIDATION"
         lifecycle_id = config.get("checksheet_download_id")
 
         try:
+            self._extract_filename_parts(source.name)
+
             with self._db.get_connection() as lifecycle_connection:
                 lifecycle_repository = ChecksheetDownloadRepository(
                     lifecycle_connection
@@ -550,15 +552,37 @@ class ChecksheetPipeline:
         return destination
 
     @staticmethod
-    def _extract_filename_parts(file_name: str) -> Dict[str, str]:
+    def _extract_filename_parts(
+        file_name: str,
+        *,
+        validate: bool = True,
+    ) -> Dict[str, str]:
         match = re.fullmatch(
             r"(?P<vehicle_model>[^_]+)_"
             r"(?P<parts_code>[^_]+)_"
-            r"(?P<op_no>OP[^_]+)(?:_.+)?",
+            r"(?P<op_no>[^_]+)(?:_.+)?",
             Path(file_name).stem,
             flags=re.IGNORECASE,
         )
         if match is None:
+            raise ValueError(
+                "Checksheet filename must match "
+                "VehicleModel_PartsCode_OPNO_Anything.xlsm"
+            )
+        if validate:
+            for group_name, segment_name in (
+                ("vehicle_model", "VehicleModel"),
+                ("parts_code", "PartsCode"),
+                ("op_no", "OPNO"),
+            ):
+                value = match.group(group_name)
+                if re.fullmatch(r"[A-Za-z0-9]+", value) is None:
+                    raise ValueError(
+                        f"Invalid checksheet filename segment '{segment_name}': "
+                        f"value '{value}' in filename '{file_name}' must contain "
+                        "only A-Z, a-z, and 0-9"
+                    )
+        if not match.group("op_no").upper().startswith("OP"):
             raise ValueError(
                 "Checksheet filename must match "
                 "VehicleModel_PartsCode_OPNO_Anything.xlsm"

@@ -79,7 +79,7 @@ class ConfigLoader:
         """
         stem = Path(filename).stem
         match = re.fullmatch(
-            r"(?P<vehicle_model>[^_]+)_(?P<parts_code>[^_]+)_(?P<op_no>OP[^_]+)(?:_.+)?",
+            r"(?P<vehicle_model>[^_]+)_(?P<parts_code>[^_]+)_(?P<op_no>[^_]+)(?:_.+)?",
             stem,
             flags=re.IGNORECASE,
         )
