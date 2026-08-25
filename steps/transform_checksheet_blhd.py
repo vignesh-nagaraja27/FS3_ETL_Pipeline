@@ -1,8 +1,45 @@
 # -*- coding: utf-8 -*-
 """Transform a BL/HD checksheet workbook into canonical ETL records.
 
-This module provides a dedicated, isolated parser for BL and HD checksheets.
-BL and HD workbooks share a common layout that differs completely from CR.
+Architecture & Business Rules:
+------------------------------
+1. Partial Master Segment Parsing:
+   BL and HD checksheets for an operation are delivered as sequence-split partial segment
+   files (e.g. GT3_BL_OP010_①.xlsx, GT3_BL_OP010_②.xlsx, GT3_BL_OP010_③.xlsx).
+   Together, all sequence files construct ONE logical master definition. This parser extracts
+   the master segment present in the target workbook without making assumptions about master completeness.
+
+2. Operation-Segmented Transactions:
+   Transaction records are segmented by (vpo_code, date, serial_no_m_last4, op_no_2nd, op_no_3rd).
+   Cell A21 metadata (op_no_2nd, op_no_3rd) is populated directly onto transaction records, allowing
+   measurements for the same serial number across distinct operation subgroups to coexist independently.
+
+3. Local Position Allocation:
+   Each qualified master row receives a workbook-local source_master_index.
+   The identifier is used only to preserve master-to-transaction relationships
+   during the transform phase and is later resolved to the final pi_no by
+   MeasurementRepository.sync_masters().
+
+4. Transaction-Driven Master Qualification Rule:
+   NO TRANSACTION VALUE = NO PI ALLOCATION.
+   A row starting at Row 21 is qualified as a valid measurement master definition IF AND ONLY IF
+   it contains at least one non-blank transaction measurement value across the discovered serial columns.
+   "No PI allocation" here means the row never becomes a master record at all -- this transformer
+   itself never allocates pi_no (see point 6); a disqualified row simply never enters the pool of
+   masters that downstream PI resolution can assign a pi_no to.
+
+5. Serial Number Preservation Rule:
+   Serial numbers are preserved exactly as formatted in Excel. Numeric serials under 4 digits
+   are padded with leading zeros (e.g., "0001", "0003", "0056") to guarantee exact serial_no_m_last4 matching.
+
+6. PI_NO Resolution Ownership:
+   Like TransformChecksheetStep, this transformer never assigns pi_no. Each qualified master
+   receives a workbook-wide, transform-run-local "source_master_index", and every transaction
+   measured against that master carries the same source_master_index. LoadChecksheetStep resolves
+   source_master_index -> pi_no after MeasurementRepository.sync_masters() runs, identical to the
+   CR checksheet flow. This transformer must not fabricate or reuse a pi_no-shaped value for any
+   other purpose (a prior revision mistakenly stamped a per-sheet position counter directly into a
+   "pi_no" field on transactions, which is incompatible with PI resolution and has been removed).
 """
 
 from __future__ import annotations
@@ -21,30 +58,17 @@ from openpyxl.utils.datetime import from_excel
 from utils.logger import LOGGER
 from utils.workbook_normalizer import WorkbookNormalizer
 
-# Type alias for file paths to support both string and Path objects
 PathLike = Union[str, Path]
 
 
 class TransformChecksheetBLHDStep:
-    """Parse normalized BL/HD worksheets into canonical master and transaction data.
+    """Parse normalized BL/HD worksheets into canonical master and transaction data."""
 
-    This parser implements the BL/HD specific workbook specification:
-      - Traverses ALL worksheets in the workbook without title filtering.
-      - Cell A21 contains sheet-level operation breakdown metadata (op_no_2nd, op_no_3rd).
-      - Cell B21 contains sheet-level machining surface metadata (machining_surface).
-      - Master definition rows begin at Row 21.
-      - Transaction date is stored in Row 11.
-      - Transaction serial number is stored in Row 14.
-      - Transaction measurement values start at Column R (column index 18).
-    """
-
-    # Constants defining the BL/HD workbook geometry and limits
     CHECKSHEET_VERSION = "00000000"
     FIRST_MASTER_ROW = 21
     TRANSACTION_DATE_ROW = 11
     TRANSACTION_SERIAL_ROW = 14
     FIRST_TRANSACTION_COL = 18  # Column R
-    MAX_DATA_COLUMNS = 500
 
     def run(
         self,
@@ -54,33 +78,11 @@ class TransformChecksheetBLHDStep:
         parts_code: Optional[str] = None,
         op_no: Optional[str] = None,
     ) -> Dict[str, List[Dict[str, Any]]]:
-        """Open, normalize, and parse one BL/HD checksheet workbook.
-
-        This is the main public entry point for the BL/HD transform step.
-        It processes every worksheet in the target workbook, extracts master
-        definitions and transaction measurements, and aggregates them into
-        canonical dictionary records.
-
-        Purpose:
-            Process a BL/HD Excel workbook and produce standardized records for database loading.
-
-        Inputs:
-            file_path: Path to the BL/HD Excel workbook file on disk.
-            vehicle_model: Optional explicit vehicle model override string.
-            parts_code: Optional explicit parts code override string.
-            op_no: Optional explicit operation number override string.
-
-        Outputs:
-            A dictionary containing two lists:
-              - 'master_records': List of extracted master record dictionaries.
-              - 'transaction_records': List of aggregated transaction record dictionaries.
-        """
+        """Open, normalize, and parse one BL/HD checksheet workbook."""
         path = Path(file_path)
         if not path.is_file():
-            # Stop early if the specified file does not exist on disk
             raise FileNotFoundError(f"BL/HD Checksheet workbook not found: {path}")
 
-        # Extract filename metadata if explicit parameters were not provided
         filename_parts = self._extract_filename_parts(path.name)
         vehicle_model = vehicle_model or filename_parts["vehicle_model"]
         parts_code = parts_code or filename_parts["parts_code"]
@@ -92,66 +94,82 @@ class TransformChecksheetBLHDStep:
             pipeline_type="CHECKSHEET",
         )
 
-        # Load normalized workbook for text parsing and raw value workbook for measurements.
-        # Two workbook instances are opened to ensure NFKC text normalization does not
-        # alter numerical floating-point precision stored in measurement cells.
         workbook = load_workbook(filename=str(path), data_only=True, read_only=False)
         value_workbook = load_workbook(
             filename=str(path), data_only=True, read_only=False
         )
 
         try:
-            # Apply Unicode NFKC normalization to standard text cells across all sheets
             WorkbookNormalizer.normalize_workbook(workbook)
 
             master_records: List[Dict[str, Any]] = []
-            transaction_by_key: Dict[Tuple[str, date, str], Dict[str, Any]] = {}
-            processed_sheet_count = 0
+            transaction_by_key: Dict[Tuple[str, date, str, int], Dict[str, Any]] = {}
 
-            # Process every worksheet in the workbook in sequential order (BL/HD rule: process ALL sheets)
+            total_candidates = 0
+            total_qualified = 0
+            total_skipped = 0
+
+            # Workbook-wide master identity, mirroring TransformChecksheetStep.
+            #
+            # This is NOT pi_no. It is a transform-run-local counter that
+            # connects a qualified master row to its measurement transactions
+            # until MeasurementRepository.sync_masters() (called later, from
+            # LoadChecksheetStep) resolves the real pi_no.
+            next_master_index = 1
+
             for worksheet in workbook.worksheets:
                 if not worksheet.title:
                     continue
 
-                processed_sheet_count += 1
                 LOGGER.info(
                     f"[SHEET FOUND] Processing sheet: {worksheet.title}",
                     pipeline_type="CHECKSHEET",
                 )
 
                 value_worksheet = value_workbook[worksheet.title]
-                sheet_masters, sheet_transactions = self._parse_sheet(
+
+                (
+                    sheet_masters,
+                    sheet_transactions,
+                    sheet_candidates,
+                    sheet_qualified,
+                    sheet_skipped,
+                    next_master_index,
+                ) = self._parse_sheet(
                     worksheet,
                     value_worksheet=value_worksheet,
-                    first_data_position=len(master_records) + 1,
+                    first_master_index=next_master_index,
                     vpo_code=vpo_code,
                     vehicle_model=vehicle_model,
                     parts_code=parts_code,
                     op_no=op_no,
                 )
 
-                # Skip empty sheets gracefully without raising an exception or interrupting processing
+                total_candidates += sheet_candidates
+                total_qualified += sheet_qualified
+                total_skipped += sheet_skipped
+
                 if not sheet_masters:
                     LOGGER.info(
-                        f"[SHEET SKIPPED] No master rows in sheet: {worksheet.title}",
+                        f"[SHEET SKIPPED] No qualified master rows in sheet: {worksheet.title}",
                         pipeline_type="CHECKSHEET",
                     )
                     continue
 
                 master_records.extend(sheet_masters)
-
-                # Enforce safety ceiling on total master definitions across all sheets
-                if len(master_records) > self.MAX_DATA_COLUMNS:
-                    raise ValueError(
-                        f"Workbook contains more than {self.MAX_DATA_COLUMNS} "
-                        "master definitions across worksheets"
-                    )
-
-                # Merge sheet-level transactions into global transaction storage by composite key
                 for transaction in sheet_transactions:
                     self._merge_transaction(transaction_by_key, transaction)
 
             transaction_records = list(transaction_by_key.values())
+
+            LOGGER.info(
+                f"[MASTER QUALIFICATION SUMMARY] "
+                f"total_candidates={total_candidates} "
+                f"qualified={total_qualified} "
+                f"skipped={total_skipped}",
+                pipeline_type="CHECKSHEET",
+            )
+
             LOGGER.info(
                 f"[TRANSFORM COMPLETED] "
                 f"master_records={len(master_records)} "
@@ -164,11 +182,9 @@ class TransformChecksheetBLHDStep:
                 "transaction_records": transaction_records,
             }
         finally:
-            # Ensure workbooks are closed to release memory and file handles
             value_workbook.close()
             workbook.close()
 
-    # Alias method to match pipeline step execution conventions
     transform = run
 
     def _parse_sheet(
@@ -176,64 +192,97 @@ class TransformChecksheetBLHDStep:
         worksheet: Any,
         *,
         value_worksheet: Any,
-        first_data_position: int,
+        first_master_index: int,
         vpo_code: str,
         vehicle_model: str,
         parts_code: str,
         op_no: str,
-    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """Parse one BL/HD worksheet for master rows and transaction columns.
-
-        Reads sheet-level metadata from Cell A21 (op_no_2nd, op_no_3rd) and
-        Cell B21 (machining_surface), master definition rows starting at Row 21,
-        and transaction measurement columns starting at Column R (index 18).
-
-        Purpose:
-            Extract master definitions and measurement columns from a single worksheet tab.
-
-        Inputs:
-            worksheet: The NFKC-normalized openpyxl worksheet object.
-            value_worksheet: The raw data-only openpyxl worksheet object.
-            first_data_position: The starting integer index for data_001 allocation.
-            vpo_code: Formatted vehicle-part-op string key.
-            vehicle_model: Vehicle model code string.
-            parts_code: Parts code string.
-            op_no: Primary operation number string.
-
-        Outputs:
-            A tuple containing:
-              - List of master record dictionaries for this worksheet.
-              - List of transaction record dictionaries for this worksheet.
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int, int, int, int]:
         """
-        # Read sheet-level operation breakdown metadata once from cell A21.
-        # In BL/HD checksheets, the manufacturer writes the operation breakdown only once
-        # per worksheet in A21, which applies to all master records in that worksheet.
+        Parse one BL/HD worksheet for qualified master rows and transaction columns.
+
+        Returns:
+            (
+                sheet_masters,
+                sheet_transactions,
+                sheet_candidates,
+                sheet_qualified,
+                sheet_skipped,
+                next_available_master_index,
+            )
+        """
+        next_master_index = first_master_index
         col_a21_value = worksheet.cell(row=21, column=1).value
         sheet_op_no_2nd, sheet_op_no_3rd = self._parse_op_no_2nd_3rd(col_a21_value)
 
-        # Read sheet-level machining surface metadata once from cell B21.
         sheet_machining_surface = worksheet.cell(row=21, column=2).value
 
-        sheet_masters: List[Dict[str, Any]] = []
+        valid_columns = self._discover_transaction_columns(
+            worksheet,
+            value_worksheet,
+        )
 
-        # Iterate through rows starting from the defined BL/HD master start row (Row 21)
+        sheet_masters: List[Dict[str, Any]] = []
+        sheet_candidates = 0
+        sheet_with_tx_values = 0
+        sheet_without_tx_values = 0
+        sheet_qualified = 0
+        sheet_skipped = 0
+
         for row_index in range(self.FIRST_MASTER_ROW, worksheet.max_row + 1):
-            if not self._is_master_row(worksheet, row_index):
+            if self._is_completely_blank_row(
+                worksheet,
+                value_worksheet,
+                row_index=row_index,
+                valid_columns=valid_columns,
+            ):
                 continue
 
-            position = first_data_position + len(sheet_masters)
-            if position > self.MAX_DATA_COLUMNS:
-                raise ValueError(
-                    f"Workbook contains more than {self.MAX_DATA_COLUMNS} "
-                    "master definitions across worksheets"
-                )
+            sheet_candidates += 1
 
-            # Assign contiguous position keys (data_001, data_002, etc.)
-            data_column = f"data_{position:03d}"
+            has_transaction_value = any(
+                not self._is_blank(
+                    self._source_value(
+                        value_worksheet,
+                        worksheet,
+                        row=row_index,
+                        column=col_index,
+                    )
+                )
+                for col_index in valid_columns
+            )
+
+            LOGGER.info(
+                f"[MASTER QUALIFICATION] sheet={worksheet.title} row={row_index} "
+                f"has_transaction_value={str(has_transaction_value).lower()}",
+                pipeline_type="CHECKSHEET",
+            )
+
+            if has_transaction_value:
+                sheet_with_tx_values += 1
+            else:
+                sheet_without_tx_values += 1
+
+            is_qualified = has_transaction_value
+
+            if not is_qualified:
+                sheet_skipped += 1
+                LOGGER.info(
+                    f"[MASTER ROW SKIP] sheet={worksheet.title} row={row_index} "
+                    f"reason=no transaction values",
+                    pipeline_type="CHECKSHEET",
+                )
+                continue
+
+            sheet_qualified += 1
+
+            source_master_index = next_master_index
+            next_master_index += 1
+
             master_record = self._build_master_record(
                 worksheet,
                 row_index=row_index,
-                data_column=data_column,
+                source_master_index=source_master_index,
                 vpo_code=vpo_code,
                 vehicle_model=vehicle_model,
                 parts_code=parts_code,
@@ -248,30 +297,34 @@ class TransformChecksheetBLHDStep:
                 f"[MASTER ROW PARSED] "
                 f"sheet={worksheet.title} "
                 f"row={row_index} "
-                f"data_column={data_column}",
+                f"row_index={row_index} "
+                f"source_master_index={source_master_index}",
                 pipeline_type="CHECKSHEET",
             )
 
-        # If no valid master rows exist on this sheet, stop transaction parsing for this sheet
+        LOGGER.info(
+            f"[MASTER ANALYSIS] "
+            f"sheet={worksheet.title} "
+            f"candidates={sheet_candidates} "
+            f"with_transaction_values={sheet_with_tx_values} "
+            f"without_transaction_values={sheet_without_tx_values}",
+            pipeline_type="CHECKSHEET",
+        )
+
         if not sheet_masters:
-            return [], []
+            return [], [], sheet_candidates, sheet_qualified, sheet_skipped, next_master_index
 
         sheet_transactions: List[Dict[str, Any]] = []
 
-        # Discover used transaction columns starting from Column R (index 18)
-        for column_index in self._discover_transaction_columns(
-            worksheet,
-            value_worksheet,
-        ):
-            # Read serial number from Row 14
-            serial_no = self._source_value(
+        for column_index in valid_columns:
+            raw_serial = self._source_value(
                 value_worksheet,
                 worksheet,
                 row=self.TRANSACTION_SERIAL_ROW,
                 column=column_index,
             )
+            serial_no = self._format_serial_no(raw_serial)
 
-            # Read transaction date from Row 11
             transaction_date = self._source_value(
                 value_worksheet,
                 worksheet,
@@ -282,33 +335,10 @@ class TransformChecksheetBLHDStep:
                 transaction_date,
                 epoch=getattr(worksheet.parent, "epoch", None),
             )
-
-            # Skip columns with unparseable or missing dates
             if parsed_date is None:
                 continue
 
-            # Construct canonical transaction dictionary header.
-            # Operation breakdown metadata belongs strictly to master rows in pre_m_measurement.
-            # One transaction spans multiple master definitions and cannot carry one
-            # authoritative row-level secondary/tertiary operation or surface value.
-            transaction_record: Dict[str, Any] = {
-                "version": self.CHECKSHEET_VERSION,
-                "mc_no": "",
-                "vpo_code": vpo_code,
-                "vehicle_model": vehicle_model,
-                "parts_code": parts_code,
-                "op_no": op_no,
-                "op_no_2nd": None,
-                "op_no_3rd": None,
-                "date": parsed_date,
-                "serial_no": serial_no,
-                "serial_no_m_last4": self._serial_no_m_last4(serial_no),
-                "eng_no": None,
-                "insert_id": "Vig",
-                "update_id": "Vig",
-            }
-
-            # Map raw measurement cell values to master data_column identifiers
+            serial_last4 = self._serial_no_m_last4(serial_no)
             for master_record in sheet_masters:
                 raw_measurement = self._source_value(
                     value_worksheet,
@@ -316,27 +346,56 @@ class TransformChecksheetBLHDStep:
                     row=master_record["row_index"],
                     column=column_index,
                 )
-                transaction_record[master_record["data_column"]] = (
-                    self._normalize_measurement_value(raw_measurement)
+                norm_val = self._normalize_measurement_value(raw_measurement)
+                if self._is_blank(norm_val):
+                    continue
+
+                transaction_record: Dict[str, Any] = {
+                    "version": self.CHECKSHEET_VERSION,
+                    "mc_no": "",
+                    "vpo_code": vpo_code,
+                    "vehicle_model": vehicle_model,
+                    "parts_code": parts_code,
+                    "op_no": op_no,
+                    "op_no_2nd": sheet_op_no_2nd,
+                    "op_no_3rd": sheet_op_no_3rd,
+                    "date": parsed_date,
+                    "serial_no": serial_no,
+                    "serial_no_m_last4": serial_last4,
+                    "eng_no": None,
+                    "value": norm_val,
+
+                    # Temporary master identity, NOT pi_no. See class
+                    # docstring point 6 -- LoadChecksheetStep resolves this
+                    # to the final pi_no after MeasurementRepository
+                    # sync_masters() runs.
+                    "source_master_index": master_record["source_master_index"],
+                }
+                sheet_transactions.append(transaction_record)
+                LOGGER.info(
+                    f"[TRANSACTION VALUE PARSED] sheet={worksheet.title} "
+                    f"column={get_column_letter(column_index)} serial_no={serial_no} "
+                    f"source_master_index={transaction_record['source_master_index']} "
+                    f"value={norm_val} "
+                    f"op_no_2nd={sheet_op_no_2nd} op_no_3rd={sheet_op_no_3rd}",
+                    pipeline_type="CHECKSHEET",
                 )
 
-            sheet_transactions.append(transaction_record)
-            LOGGER.info(
-                f"[TRANSACTION COLUMN PARSED] "
-                f"sheet={worksheet.title} "
-                f"column={get_column_letter(column_index)} "
-                f"serial_no={serial_no}",
-                pipeline_type="CHECKSHEET",
-            )
-
-        return sheet_masters, sheet_transactions
+        return (
+            sheet_masters,
+            sheet_transactions,
+            sheet_candidates,
+            sheet_qualified,
+            sheet_skipped,
+            next_master_index,
+        )
 
     def _build_master_record(
         self,
         worksheet: Any,
         *,
         row_index: int,
-        data_column: str,
+        source_master_index: int,
         vpo_code: str,
         vehicle_model: str,
         parts_code: str,
@@ -345,41 +404,14 @@ class TransformChecksheetBLHDStep:
         op_no_3rd: Optional[str] = None,
         machining_surface: Optional[Any] = None,
     ) -> Dict[str, Any]:
-        """Construct one canonical master record dictionary from BL/HD cell values.
-
-        Applies BL/HD column layout mappings:
-          A21 -> op_no_2nd / op_no_3rd (sheet-level metadata passed in)
-          B21 -> machining_surface (sheet-level metadata passed in)
-          C -> op_name
-          D -> Inspection_no
-          E -> measure_item
-          F -> measure_rank
-          G + H -> measure_point
-          I -> measure_method
-          L -> measure_frequency
-          M -> specification
-          O -> upper_limit
-          P -> lower_limit
-
-        Purpose:
-            Read cell values from a master row and map them into the canonical schema.
-
-        Inputs:
-            worksheet: Openpyxl worksheet object.
-            row_index: Integer row index in worksheet.
-            data_column: Canonical position column name (e.g. 'data_001').
-            vpo_code: Formatted vehicle-part-op string.
-            vehicle_model: Vehicle model code string.
-            parts_code: Parts code string.
-            op_no: Operation number string.
-            op_no_2nd: Sheet-level secondary operation number extracted from A21.
-            op_no_3rd: Sheet-level tertiary operation number extracted from A21.
-            machining_surface: Sheet-level machining surface string extracted from B21.
-
-        Outputs:
-            Canonical master dictionary matching LoadChecksheetStep schema.
         """
-        # Concatenate Column G and Column H for measure_point
+        Construct one canonical master record dictionary from BL/HD cell values.
+
+        ``source_master_index`` is a temporary workbook-local identifier used
+        solely to connect this master definition to its transaction rows
+        until MeasurementRepository resolves the final pi_no. It is NOT
+        pi_no and must never be persisted or treated as one.
+        """
         col_g_value = worksheet.cell(row=row_index, column=7).value
         col_h_value = worksheet.cell(row=row_index, column=8).value
         measure_point = self._combine_measure_point(col_g_value, col_h_value)
@@ -406,34 +438,48 @@ class TransformChecksheetBLHDStep:
             "specification": worksheet.cell(row=row_index, column=13).value,
             "upper_limit": worksheet.cell(row=row_index, column=15).value,
             "lower_limit": worksheet.cell(row=row_index, column=16).value,
-            "data_column": data_column,
+
+            # Temporary workbook-local identity connecting this master to
+            # its transaction rows. See method docstring above.
+            "source_master_index": source_master_index,
+
+            # Physical source location, used only while reading this
+            # workbook during this transform run.
             "row_index": row_index,
+
             "insert_id": "Vig",
             "update_id": "Vig",
         }
 
     @classmethod
-    def _is_master_row(cls, worksheet: Any, row_index: int) -> bool:
-        """Determine if a worksheet row contains a valid master definition.
-
-        Checks key BL/HD master columns (Column D: Inspection_no, Column E:
-        measure_item, Column M: specification) to ensure the row is not blank.
-
-        Purpose:
-            Filter out empty or decorative non-master rows in the master section.
-
-        Inputs:
-            worksheet: Openpyxl worksheet object.
-            row_index: Integer row index to evaluate.
-
-        Outputs:
-            True if row contains master definition data, False otherwise.
-        """
-        # Read Column D (col 4), Column E (col 5), and Column M (col 13)
-        return not all(
+    def _is_completely_blank_row(
+        cls,
+        worksheet: Any,
+        value_worksheet: Any,
+        *,
+        row_index: int,
+        valid_columns: List[int],
+    ) -> bool:
+        """Check if a row contains no cell values across both master and transaction columns."""
+        master_cols_blank = all(
             cls._is_blank(worksheet.cell(row=row_index, column=col).value)
-            for col in (4, 5, 13)
+            for col in (3, 4, 5, 6, 7, 8, 9, 12, 13, 15, 16)
         )
+        if not master_cols_blank:
+            return False
+
+        tx_cols_blank = all(
+            cls._is_blank(
+                cls._source_value(
+                    value_worksheet,
+                    worksheet,
+                    row=row_index,
+                    column=col,
+                )
+            )
+            for col in valid_columns
+        )
+        return tx_cols_blank
 
     @classmethod
     def _discover_transaction_columns(
@@ -441,25 +487,10 @@ class TransformChecksheetBLHDStep:
         worksheet: Any,
         value_worksheet: Any,
     ) -> List[int]:
-        """Find all columns containing valid serial numbers starting from Column R.
-
-        Iterates from Column R (column index 18) to max_column and collects
-        indexes of columns where Row 14 contains a serial number value.
-
-        Purpose:
-            Identify which worksheet columns contain measurement transactions.
-
-        Inputs:
-            worksheet: Normalized openpyxl worksheet object.
-            value_worksheet: Raw data-only openpyxl worksheet object.
-
-        Outputs:
-            List of integer column indices containing transaction serials.
-        """
+        """Find all columns containing valid serial numbers starting from Column R."""
         max_col = max(worksheet.max_column, value_worksheet.max_column, 1)
         valid_columns: List[int] = []
 
-        # Scan columns starting at Column R (index 18)
         for col_index in range(cls.FIRST_TRANSACTION_COL, max_col + 1):
             serial_val = cls._source_value(
                 value_worksheet,
@@ -474,29 +505,11 @@ class TransformChecksheetBLHDStep:
 
     @staticmethod
     def _combine_measure_point(val_g: Any, val_h: Any) -> Optional[str]:
-        """Combine Column G and Column H cell values into one measure_point string.
-
-        Implements BL/HD concatenation rules:
-          - Both populated: concatenated string (e.g., "面取り部#12")
-          - Only G populated: string G
-          - Only H populated: string H
-          - Both blank/null: None
-
-        Purpose:
-            Produce the unified measure_point string required for PI_NO identity matching.
-
-        Inputs:
-            val_g: Raw value from Column G (Column 7).
-            val_h: Raw value from Column H (Column 8).
-
-        Outputs:
-            Combined measure_point string or None if both cells are empty.
-        """
+        """Combine Column G and Column H cell values into one measure_point string."""
         str_g = str(val_g).strip() if val_g is not None else ""
         str_h = str(val_h).strip() if val_h is not None else ""
 
         if str_g and str_h:
-            # Join both column values directly without adding extra delimiter characters
             return f"{str_g}{str_h}"
         if str_g:
             return str_g
@@ -506,86 +519,94 @@ class TransformChecksheetBLHDStep:
 
     @staticmethod
     def _parse_op_no_2nd_3rd(val_a: Any) -> Tuple[Optional[str], Optional[str]]:
-        """Parse secondary and tertiary operation numbers from Cell A21.
-
-        Splits hyphenated text (e.g. "1-3") into op_no_2nd and op_no_3rd.
-        Maps non-hyphenated values (e.g. "12") to op_no_2nd with op_no_3rd=None.
-
-        Purpose:
-            Extract secondary and tertiary operation numbers from Cell A21 metadata.
-
-        Inputs:
-            val_a: Raw cell value from Cell A21 (Column 1, Row 21).
-
-        Outputs:
-            Tuple containing (op_no_2nd_string, op_no_3rd_string).
-        """
+        """Parse secondary and tertiary operation numbers from Cell A21."""
         if val_a is None:
             return None, None
 
-        # Convert numeric or string value to trimmed string
         text = str(val_a).strip()
         if not text:
             return None, None
 
         if "-" in text:
-            # Split hyphenated operation indicator into 2nd and 3rd parts
             parts = text.split("-", 1)
             op_2nd = parts[0].strip() or None
             op_3rd = parts[1].strip() or None
             return op_2nd, op_3rd
 
-        # Single non-hyphenated value maps to op_no_2nd
         return text, None
 
     @classmethod
     def _merge_transaction(
         cls,
-        transaction_by_key: Dict[Tuple[str, date, str], Dict[str, Any]],
+        transaction_by_key: Dict[Tuple[str, date, str, int], Dict[str, Any]],
         incoming: Dict[str, Any],
     ) -> None:
-        """Merge transaction measurements across multiple worksheets.
-
-        Uses composite key (vpo_code, transaction_date, serial_no_m_last4) to combine
-        data_001..data_500 columns for serial numbers appearing on multiple sheets.
-
-        Purpose:
-            Consolidate multi-sheet measurements for the same serial into a single database row.
-
-        Inputs:
-            transaction_by_key: Dictionary storing transactions by composite key.
-            incoming: Candidate transaction dictionary extracted from current sheet.
-
-        Outputs:
-            None (updates transaction_by_key in-place).
-
-        Raises:
-            ValueError: If full serial numbers conflict under identical composite key.
         """
+        Validate normalized transaction uniqueness and reject conflicting duplicates.
+
+        Transaction identity during transformation is:
+
+            (vpo_code, date, serial_no_m_last4, source_master_index)
+
+        source_master_index is a temporary workbook-local master identity
+        (see class docstring point 6) and is intentionally not a final
+        pi_no. Because each master's source_master_index already implies
+        which (op_no_2nd, op_no_3rd) subgroup it belongs to, this key does
+        not need to separately include those fields.
+        """
+        source_master_index = incoming.get("source_master_index")
+
+        if source_master_index is None:
+            raise ValueError(
+                "transaction record requires source_master_index"
+            )
+
+        try:
+            source_master_index = int(source_master_index)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "transaction source_master_index must be an integer"
+            ) from exc
+
+        if source_master_index <= 0:
+            raise ValueError(
+                "transaction source_master_index must be greater than zero"
+            )
+
+        required_fields = (
+            "vpo_code",
+            "date",
+            "serial_no",
+            "serial_no_m_last4",
+            "value",
+        )
+
+        for field_name in required_fields:
+            if field_name not in incoming:
+                raise ValueError(
+                    f"transaction record missing required field: {field_name}"
+                )
+
         key = (
             str(incoming["vpo_code"]),
             incoming["date"],
             str(incoming["serial_no_m_last4"]),
+            source_master_index,
         )
         existing = transaction_by_key.get(key)
         if existing is None:
             transaction_by_key[key] = incoming
             return
 
-        # Ensure full serial numbers match when composite key collides
         if str(existing.get("serial_no")) != str(incoming.get("serial_no")):
             raise ValueError(
-                "serial_no_m_last4 collision for the same vpo_code and date: "
+                "serial_no_m_last4 collision for the same vpo_code, date, and source_master_index: "
                 f"{existing.get('serial_no')!r} and {incoming.get('serial_no')!r}"
             )
 
         for name in (
-            "version",
-            "mc_no",
-            "vehicle_model",
-            "parts_code",
-            "op_no",
-            "eng_no",
+            "version", "mc_no", "vehicle_model", "parts_code", "op_no",
+            "op_no_2nd", "op_no_3rd", "eng_no",
         ):
             existing_value = existing.get(name)
             incoming_value = incoming.get(name)
@@ -601,15 +622,11 @@ class TransformChecksheetBLHDStep:
             if existing_value is None:
                 existing[name] = incoming_value
 
-        # Merge data_XXX measurement fields into existing transaction record
-        for name, value in incoming.items():
-            if not name.startswith("data_"):
-                continue
-            if name in existing and existing[name] != value:
-                raise ValueError(
-                    f"conflicting measurement value for {name} and transaction key {key!r}"
-                )
-            existing[name] = value
+        if existing.get("value") != incoming.get("value"):
+            raise ValueError(
+                f"conflicting measurement value for transaction key {key!r}: "
+                f"{existing.get('value')!r} != {incoming.get('value')!r}"
+            )
 
     @staticmethod
     def _source_value(
@@ -619,20 +636,7 @@ class TransformChecksheetBLHDStep:
         row: int,
         column: int,
     ) -> Any:
-        """Retrieve raw cell value with fallback to normalized sheet cell.
-
-        Purpose:
-            Prefer raw cell value from data_only workbook to preserve numeric accuracy.
-
-        Inputs:
-            value_worksheet: Data-only worksheet object.
-            normalized_worksheet: NFKC normalized worksheet object.
-            row: Integer row number.
-            column: Integer column number.
-
-        Outputs:
-            Cell value from value_worksheet if not None, else from normalized_worksheet.
-        """
+        """Retrieve raw cell value with fallback to normalized sheet cell."""
         val = value_worksheet.cell(row=row, column=column).value
         if val is not None:
             return val
@@ -640,18 +644,7 @@ class TransformChecksheetBLHDStep:
 
     @staticmethod
     def _normalize_measurement_value(value: Any) -> Any:
-        """Format floating-point numbers preserving exact display values without scientific notation.
-
-        Purpose:
-            Convert openpyxl numeric cell values to clean strings while avoiding
-            IEEE 754 binary floating-point artifacts (e.g. 37.57 -> 37.569999999999998).
-
-        Inputs:
-            value: Raw cell value from openpyxl.
-
-        Outputs:
-            Clean string representation for floats, or original value for other types.
-        """
+        """Format floating-point numbers preserving exact display values."""
         if isinstance(value, float):
             text = str(value)
             if "e" in text.lower():
@@ -661,40 +654,35 @@ class TransformChecksheetBLHDStep:
         return value
 
     @staticmethod
-    def _serial_no_m_last4(value: Any) -> str:
-        """Extract last 4 characters from serial number for composite key creation.
-
-        Purpose:
-            Generate uniform 4-character trailing string for transaction key matching.
-
-        Inputs:
-            value: Raw serial number value.
-
-        Outputs:
-            4-character trailing string slice of the serial number.
-        """
-        if isinstance(value, float) and value.is_integer():
-            text = str(int(value))
-        else:
-            text = str(value)
-        if not text:
+    def _format_serial_no(value: Any) -> str:
+        """Format serial number preserving exact string values and padding numeric values."""
+        if value is None:
             raise ValueError("serial_no is required")
-        return text[-4:]
+        
+        if isinstance(value, (int, float)):
+            try:
+                ival = int(value)
+                return f"{ival:04d}"
+            except (ValueError, OverflowError):
+                text = str(value).strip()
+        else:
+            text = str(value).strip()
+
+        if text.isdigit() and len(text) < 4:
+            return text.zfill(4)
+        return text
+
+    @classmethod
+    def _serial_no_m_last4(cls, value: Any) -> str:
+        """Extract last 4 characters from formatted serial number for composite key creation."""
+        formatted = cls._format_serial_no(value)
+        if not formatted:
+            raise ValueError("serial_no is required")
+        return formatted[-4:]
 
     @staticmethod
     def _coerce_date(value: Any, *, epoch: Any = None) -> Optional[date]:
-        """Convert various date representations (ISO, Excel float, Japanese format) to date.
-
-        Purpose:
-            Robustly convert arbitrary cell date inputs into a python datetime.date object.
-
-        Inputs:
-            value: Raw input date cell value.
-            epoch: Optional workbook epoch date for Excel float conversion.
-
-        Outputs:
-            datetime.date object if conversion succeeds, or None.
-        """
+        """Convert various date representations to python date."""
         if isinstance(value, datetime):
             return value.date()
         if isinstance(value, date):
@@ -745,51 +733,17 @@ class TransformChecksheetBLHDStep:
 
     @staticmethod
     def _is_blank(value: Any) -> bool:
-        """Check if a cell value is None or empty string.
-
-        Purpose:
-            Test if cell has no meaningful text or numeric data.
-
-        Inputs:
-            value: Raw cell value.
-
-        Outputs:
-            True if blank or empty, False otherwise.
-        """
+        """Check if a cell value is None or empty string."""
         return value is None or (isinstance(value, str) and not value.strip())
 
     @staticmethod
     def _build_vpo_code(vehicle_model: str, parts_code: str, op_no: str) -> str:
-        """Construct canonical VPO code string.
-
-        Purpose:
-            Format standardized key joining vehicle model, parts code, and operation number.
-
-        Inputs:
-            vehicle_model: Model string (e.g. 'BL').
-            parts_code: Parts code string.
-            op_no: OP number string.
-
-        Outputs:
-            Formatted VPO code '{vehicle_model}_{parts_code}_{op_no}'.
-        """
+        """Construct canonical VPO code string."""
         return f"{vehicle_model}_{parts_code}_{op_no}"
 
     @staticmethod
     def _extract_filename_parts(file_name: str) -> Dict[str, str]:
-        """Extract model, parts code, and OP number from BL/HD filename stem.
-
-        Filename pattern: VehicleModel_PartsCode_OPNO_Anything.xlsx
-
-        Purpose:
-            Parse metadata components directly from the file name.
-
-        Inputs:
-            file_name: File name string.
-
-        Outputs:
-            Dictionary containing 'vehicle_model', 'parts_code', and 'op_no'.
-        """
+        """Extract model, parts code, and OP number from BL/HD filename stem."""
         stem = Path(file_name).stem
         match = re.fullmatch(
             r"(?P<vehicle_model>[^_]+)_"

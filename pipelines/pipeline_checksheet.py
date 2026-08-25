@@ -4,16 +4,29 @@
 Architecture & Synchronization Principles:
 ------------------------------------------
 1. Source Workbook is the Absolute Source of Truth:
-   The database must reflect the exact contents of the source workbook.
+   The database must reflect the exact contents of the source workbook for transactions.
    If a serial row is removed from the workbook, reprocessing must automatically
    delete that transaction record from fs3.pre_t_measurement.
 
-2. Full Transaction Synchronization (INSERT / UPDATE / DELETE):
+2. Master Scope Contracts:
+   - CR Checksheets: Represent complete single-file master definitions. Missing database
+     PIs are treated as obsolete definitions and marked for MASTER_DELETE.
+   - BL / HD Checksheets: Represent partial master segments (sequence files ①, ②, ③...).
+     Unclaimed database PIs during a segment file load are preserved.
+
+3. Full Transaction Synchronization (INSERT / UPDATE / DELETE):
    - INSERT: New serials added in the workbook.
-   - UPDATE: Existing serials with modified measurement values (data_001..data_500).
+   - UPDATE: Existing normalized transaction measurements
+identified by
+(version,
+vpo_code,
+date,
+serial_no_m_last4,
+pi_no,
+watch_id)
    - DELETE: Serials present in DB but removed from the workbook.
 
-3. Shared Audit Table (fs3.pre_cs_measurement_change_log):
+4. Shared Audit Table (fs3.pre_cs_measurement_change_log):
    Master changes and transaction changes share the same audit log table using
    change_type values: MASTER_INSERT, MASTER_UPDATE, MASTER_DELETE,
    TRANSACTION_INSERT, TRANSACTION_UPDATE, TRANSACTION_DELETE.
@@ -192,7 +205,6 @@ class ChecksheetPipeline:
                 **context,
             )
 
-            # Mark runtime processing lifecycle in fs3.pre_l_measurement_processing_lock
             with self._db.get_connection() as lock_conn:
                 lock_repo = ProcessingLockRepository(lock_conn)
                 lock_repo.mark_processing(
@@ -208,9 +220,9 @@ class ChecksheetPipeline:
             with connection_manager as database_connection:
                 file_version_repository = FileVersionRepository(database_connection)
 
-                # Change Detection Logic: Compare new_hash against latest successfully PROCESSED hash
                 failed_step = "REGISTER"
-                latest_processed = file_version_repository.get_latest_processed_for_file(source.name,clean_watch_id
+                latest_processed = file_version_repository.get_latest_processed_for_file(
+                    source.name, clean_watch_id
                 )
                 if latest_processed and latest_processed.get("file_hash") == file_hash:
                     database_connection.rollback()
@@ -302,12 +314,16 @@ class ChecksheetPipeline:
                         part=parts_code,
                         op=op_no,
                     )
-                    if parts_code.upper() in {"BL", "HD"}:
+
+                    is_partial_master = parts_code.upper() in {"BL", "HD"}
+
+                    if is_partial_master:
                         transform_step = self._blhd_transform_step
-                        LOGGER.info("[TRANSFORM ROUTING] Using BL/HD transformer",**context)
+                        LOGGER.info("[TRANSFORM ROUTING] Using BL/HD transformer", **context)
                     else:
                         transform_step = self._cr_transform_step
-                        LOGGER.info("[TRANSFORM ROUTING] Using CR transformer",**context)
+                        LOGGER.info("[TRANSFORM ROUTING] Using CR transformer", **context)
+
                     transformed_records = transform_step.run(
                         source,
                         vehicle_model=vehicle_model,
@@ -315,11 +331,11 @@ class ChecksheetPipeline:
                         op_no=op_no,
                     )
                     LOGGER.info(
-f"[TRANSFORM RESULT] "
-f"master_records={len(transformed_records.get('master_records', []))} "
-f"transaction_records={len(transformed_records.get('transaction_records', []))}",
-**context,
-)
+                        f"[TRANSFORM RESULT] "
+                        f"master_records={len(transformed_records.get('master_records', []))} "
+                        f"transaction_records={len(transformed_records.get('transaction_records', []))}",
+                        **context,
+                    )
 
                     failed_step = "LOAD"
                     self._status.set_processing(
@@ -332,7 +348,8 @@ f"transaction_records={len(transformed_records.get('transaction_records', []))}"
                     )
                     LOGGER.info(
                         f"[LOG_ID:{log_id}] [LOAD START] Loading '{source.name}' with "
-                        f"audit context (watch_id={clean_watch_id}, file_version_id={file_version_id}).",
+                        f"audit context (watch_id={clean_watch_id}, file_version_id={file_version_id}, "
+                        f"is_partial_master={is_partial_master}).",
                         **context,
                     )
                     loaded_count = self._load_step.run(
@@ -346,6 +363,7 @@ f"transaction_records={len(transformed_records.get('transaction_records', []))}"
                         version=self.CHECKSHEET_VERSION,
                         watch_id=clean_watch_id,
                         file_version_id=file_version_id,
+                        is_partial_master=is_partial_master,
                     )
                     if loaded_count < 0:
                         raise ValueError("Transaction synchronization failed")
@@ -364,7 +382,6 @@ f"transaction_records={len(transformed_records.get('transaction_records', []))}"
                     )
                     database_connection.commit()
 
-                    # Mark PROCESSED in runtime processing lifecycle table
                     with self._db.get_connection() as lock_conn:
                         ProcessingLockRepository(lock_conn).mark_processed(file_hash)
 
