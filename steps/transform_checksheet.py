@@ -78,8 +78,12 @@ class TransformChecksheetStep:
             master_records: List[Dict[str, Any]] = []
 
             transaction_by_key: Dict[
-                Tuple[str, date, str, int],
+                Tuple[str, date, str, int, int],
                 Dict[str, Any],
+            ] = {}
+            occurrence_by_event: Dict[Tuple[date, str, int, int], int] = {}
+            occurrence_count_by_master_serial_date: Dict[
+                Tuple[date, str, int], int
             ] = {}
 
             op_sheet_count = 0
@@ -120,6 +124,10 @@ class TransformChecksheetStep:
                         vehicle_model=vehicle_model,
                         parts_code=parts_code,
                         op_no=op_no,
+                        occurrence_by_event=occurrence_by_event,
+                        occurrence_count_by_master_serial_date=(
+                            occurrence_count_by_master_serial_date
+                        ),
                     )
                 )
 
@@ -168,6 +176,10 @@ class TransformChecksheetStep:
         vehicle_model: str,
         parts_code: str,
         op_no: str,
+        occurrence_by_event: Dict[Tuple[date, str, int, int], int],
+        occurrence_count_by_master_serial_date: Dict[
+            Tuple[date, str, int], int
+        ],
     ) -> Tuple[
         List[Dict[str, Any]],
         List[Dict[str, Any]],
@@ -337,6 +349,39 @@ class TransformChecksheetStep:
                 if self._is_blank(value):
                     continue
 
+                # Occurrence belongs to this master (and therefore its final
+                # PI), not to the serial/date globally. Allocation happens
+                # only for real transactions so blank cells cannot create
+                # gaps in a master's independent recheck sequence.
+                occurrence_event_key = (
+                    parsed_date,
+                    serial_no_m_last4,
+                    source_master_index,
+                    column_index,
+                )
+                measurement_occurrence_no = occurrence_by_event.get(
+                    occurrence_event_key
+                )
+                if measurement_occurrence_no is None:
+                    master_serial_date_key = (
+                        parsed_date,
+                        serial_no_m_last4,
+                        source_master_index,
+                    )
+                    measurement_occurrence_no = (
+                        occurrence_count_by_master_serial_date.get(
+                            master_serial_date_key,
+                            0,
+                        )
+                        + 1
+                    )
+                    occurrence_count_by_master_serial_date[
+                        master_serial_date_key
+                    ] = measurement_occurrence_no
+                    occurrence_by_event[occurrence_event_key] = (
+                        measurement_occurrence_no
+                    )
+
                 transaction_record: Dict[str, Any] = {
                     "version": self.CHECKSHEET_VERSION,
                     "mc_no": master_record.get(
@@ -368,6 +413,7 @@ class TransformChecksheetStep:
                     "date": parsed_date,
                     "serial_no": serial_no,
                     "serial_no_m_last4": serial_no_m_last4,
+                    "measurement_occurrence_no": measurement_occurrence_no,
                     "eng_no": master_record.get(
                         "eng_no"
                     ),
@@ -407,7 +453,7 @@ class TransformChecksheetStep:
     def _merge_transaction(
         cls,
         transaction_by_key: Dict[
-            Tuple[str, date, str, int],
+            Tuple[str, date, str, int, int],
             Dict[str, Any],
         ],
         incoming: Dict[str, Any],
@@ -422,6 +468,7 @@ class TransformChecksheetStep:
                 date,
                 serial_no_m_last4,
                 source_master_index,
+                measurement_occurrence_no,
             )
 
         ``source_master_index`` is a temporary workbook-local master
@@ -465,6 +512,7 @@ class TransformChecksheetStep:
             "date",
             "serial_no",
             "serial_no_m_last4",
+            "measurement_occurrence_no",
             "value",
         )
 
@@ -480,6 +528,7 @@ class TransformChecksheetStep:
             incoming["date"],
             str(incoming["serial_no_m_last4"]),
             source_master_index,
+            int(incoming["measurement_occurrence_no"]),
         )
 
         existing = transaction_by_key.get(key)
@@ -963,24 +1012,18 @@ class TransformChecksheetStep:
                 "VehicleModel_PartsCode_OPNO_Anything.xlsm"
             )
 
-        for group_name, segment_name in (
-            ("vehicle_model", "VehicleModel"),
-            ("parts_code", "PartsCode"),
-            ("op_no", "OPNO"),
+        for group_name, segment_name, pattern, allowed_characters in (
+            ("vehicle_model", "VehicleModel", r"[A-Za-z0-9]+", "A-Z, a-z, and 0-9"),
+            ("parts_code", "PartsCode", r"[A-Za-z0-9-]+", "A-Z, a-z, 0-9, and -"),
+            ("op_no", "OPNO", r"OP[0-9]+", "OP followed by digits (0-9)"),
         ):
             value = match.group(group_name)
-            if re.fullmatch(r"[A-Za-z0-9]+", value) is None:
+            if re.fullmatch(pattern, value) is None:
                 raise ValueError(
                     f"Invalid checksheet filename segment '{segment_name}': "
                     f"value '{value}' in filename '{file_name}' must contain "
-                    "only A-Z, a-z, and 0-9"
+                    f"only {allowed_characters}"
                 )
-        if not match.group("op_no").upper().startswith("OP"):
-            raise ValueError(
-                "Checksheet filename must match "
-                "VehicleModel_PartsCode_OPNO_Anything.xlsm"
-            )
-
         return {
             "vehicle_model": match.group(
                 "vehicle_model"

@@ -300,6 +300,16 @@ class LoadChecksheetStep:
                 raise ValueError(f"transaction_records[{index}].serial_no_m_last4 is required")
             if transaction_record.get("date") is None:
                 raise ValueError(f"transaction_records[{index}].date is required")
+            occurrence_no = transaction_record.get("measurement_occurrence_no")
+            if (
+                isinstance(occurrence_no, bool)
+                or not isinstance(occurrence_no, int)
+                or occurrence_no <= 0
+            ):
+                raise ValueError(
+                    f"transaction_records[{index}].measurement_occurrence_no "
+                    "must be a positive integer"
+                )
 
             transaction_date = cls._coerce_date(transaction_record["date"])
             if transaction_date is None:
@@ -437,6 +447,7 @@ class LoadChecksheetStep:
                 transaction_date,
                 str(transaction_record["serial_no_m_last4"]),
                 pi_no,
+                int(transaction_record["measurement_occurrence_no"]),
             )
             if key in seen_keys:
                 raise ValueError(f"duplicate transaction key: {key!r}")

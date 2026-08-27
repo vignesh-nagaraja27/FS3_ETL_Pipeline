@@ -9,10 +9,11 @@ Architecture & Business Rules:
    Together, all sequence files construct ONE logical master definition. This parser extracts
    the master segment present in the target workbook without making assumptions about master completeness.
 
-2. Operation-Segmented Transactions:
-   Transaction records are segmented by (vpo_code, date, serial_no_m_last4, op_no_2nd, op_no_3rd).
-   Cell A21 metadata (op_no_2nd, op_no_3rd) is populated directly onto transaction records, allowing
-   measurements for the same serial number across distinct operation subgroups to coexist independently.
+2. Measurement-Occurrence Transactions:
+   Each non-blank source transaction cell is one measurement event for a specific master. Repeated
+   serial/date cells against that master receive deterministic measurement_occurrence_no values,
+   allowing initial and recheck measurements to coexist against the same final pi_no. Different
+   masters maintain independent sequences, and blank cells never consume occurrence numbers.
 
 3. Local Position Allocation:
    Each qualified master row receives a workbook-local source_master_index.
@@ -68,6 +69,7 @@ class TransformChecksheetBLHDStep:
     FIRST_MASTER_ROW = 21
     TRANSACTION_DATE_ROW = 11
     TRANSACTION_SERIAL_ROW = 14
+    ALTERNATE_TRANSACTION_COL = 17  # Column Q
     FIRST_TRANSACTION_COL = 18  # Column R
 
     def run(
@@ -103,7 +105,13 @@ class TransformChecksheetBLHDStep:
             WorkbookNormalizer.normalize_workbook(workbook)
 
             master_records: List[Dict[str, Any]] = []
-            transaction_by_key: Dict[Tuple[str, date, str, int], Dict[str, Any]] = {}
+            transaction_by_key: Dict[
+                Tuple[str, date, str, int, int], Dict[str, Any]
+            ] = {}
+            occurrence_by_event: Dict[Tuple[date, str, int, int], int] = {}
+            occurrence_count_by_master_serial_date: Dict[
+                Tuple[date, str, int], int
+            ] = {}
 
             total_candidates = 0
             total_qualified = 0
@@ -143,6 +151,10 @@ class TransformChecksheetBLHDStep:
                     vehicle_model=vehicle_model,
                     parts_code=parts_code,
                     op_no=op_no,
+                    occurrence_by_event=occurrence_by_event,
+                    occurrence_count_by_master_serial_date=(
+                        occurrence_count_by_master_serial_date
+                    ),
                 )
 
                 total_candidates += sheet_candidates
@@ -197,6 +209,10 @@ class TransformChecksheetBLHDStep:
         vehicle_model: str,
         parts_code: str,
         op_no: str,
+        occurrence_by_event: Dict[Tuple[date, str, int, int], int],
+        occurrence_count_by_master_serial_date: Dict[
+            Tuple[date, str, int], int
+        ],
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int, int, int, int]:
         """
         Parse one BL/HD worksheet for qualified master rows and transaction columns.
@@ -229,7 +245,16 @@ class TransformChecksheetBLHDStep:
         sheet_qualified = 0
         sheet_skipped = 0
 
+        # BL/HD checksheets frequently use vertically merged operation-name cells.
+        # Rows beneath the merged region belong to the same logical operation and
+        # therefore inherit the nearest previous nonblank op_name within the worksheet.
+        active_op_name: Optional[Any] = None
+
         for row_index in range(self.FIRST_MASTER_ROW, worksheet.max_row + 1):
+            col_c_val = worksheet.cell(row=row_index, column=3).value
+            if not self._is_blank(col_c_val):
+                active_op_name = col_c_val
+
             if self._is_completely_blank_row(
                 worksheet,
                 value_worksheet,
@@ -290,6 +315,7 @@ class TransformChecksheetBLHDStep:
                 op_no_2nd=sheet_op_no_2nd,
                 op_no_3rd=sheet_op_no_3rd,
                 machining_surface=sheet_machining_surface,
+                op_name=active_op_name,
             )
             sheet_masters.append(master_record)
 
@@ -350,6 +376,41 @@ class TransformChecksheetBLHDStep:
                 if self._is_blank(norm_val):
                     continue
 
+                source_master_index = master_record["source_master_index"]
+
+                # Occurrence belongs to this master (and therefore its final
+                # PI), not to the serial/date globally. Allocation happens
+                # only for real transactions so blank cells cannot create
+                # gaps in a master's independent recheck sequence.
+                occurrence_event_key = (
+                    parsed_date,
+                    serial_last4,
+                    source_master_index,
+                    column_index,
+                )
+                measurement_occurrence_no = occurrence_by_event.get(
+                    occurrence_event_key
+                )
+                if measurement_occurrence_no is None:
+                    master_serial_date_key = (
+                        parsed_date,
+                        serial_last4,
+                        source_master_index,
+                    )
+                    measurement_occurrence_no = (
+                        occurrence_count_by_master_serial_date.get(
+                            master_serial_date_key,
+                            0,
+                        )
+                        + 1
+                    )
+                    occurrence_count_by_master_serial_date[
+                        master_serial_date_key
+                    ] = measurement_occurrence_no
+                    occurrence_by_event[occurrence_event_key] = (
+                        measurement_occurrence_no
+                    )
+
                 transaction_record: Dict[str, Any] = {
                     "version": self.CHECKSHEET_VERSION,
                     "mc_no": "",
@@ -362,6 +423,7 @@ class TransformChecksheetBLHDStep:
                     "date": parsed_date,
                     "serial_no": serial_no,
                     "serial_no_m_last4": serial_last4,
+                    "measurement_occurrence_no": measurement_occurrence_no,
                     "eng_no": None,
                     "value": norm_val,
 
@@ -369,12 +431,13 @@ class TransformChecksheetBLHDStep:
                     # docstring point 6 -- LoadChecksheetStep resolves this
                     # to the final pi_no after MeasurementRepository
                     # sync_masters() runs.
-                    "source_master_index": master_record["source_master_index"],
+                    "source_master_index": source_master_index,
                 }
                 sheet_transactions.append(transaction_record)
                 LOGGER.info(
                     f"[TRANSACTION VALUE PARSED] sheet={worksheet.title} "
                     f"column={get_column_letter(column_index)} serial_no={serial_no} "
+                    f"measurement_occurrence_no={measurement_occurrence_no} "
                     f"source_master_index={transaction_record['source_master_index']} "
                     f"value={norm_val} "
                     f"op_no_2nd={sheet_op_no_2nd} op_no_3rd={sheet_op_no_3rd}",
@@ -403,6 +466,7 @@ class TransformChecksheetBLHDStep:
         op_no_2nd: Optional[str] = None,
         op_no_3rd: Optional[str] = None,
         machining_surface: Optional[Any] = None,
+        op_name: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         Construct one canonical master record dictionary from BL/HD cell values.
@@ -426,7 +490,7 @@ class TransformChecksheetBLHDStep:
             "op_no_2nd": op_no_2nd,
             "op_no_3rd": op_no_3rd,
             "machining_surface": machining_surface,
-            "op_name": worksheet.cell(row=row_index, column=3).value,
+            "op_name": op_name,
             "Inspection_no": worksheet.cell(row=row_index, column=4).value,
             "measure_item": worksheet.cell(row=row_index, column=5).value,
             "measure_rank": worksheet.cell(row=row_index, column=6).value,
@@ -487,11 +551,15 @@ class TransformChecksheetBLHDStep:
         worksheet: Any,
         value_worksheet: Any,
     ) -> List[int]:
-        """Find all columns containing valid serial numbers starting from Column R."""
+        """Find all columns containing valid serial numbers in the transaction area."""
         max_col = max(worksheet.max_column, value_worksheet.max_column, 1)
         valid_columns: List[int] = []
+        transaction_start_column = cls._determine_transaction_start_column(
+            worksheet,
+            value_worksheet,
+        )
 
-        for col_index in range(cls.FIRST_TRANSACTION_COL, max_col + 1):
+        for col_index in range(transaction_start_column, max_col + 1):
             serial_val = cls._source_value(
                 value_worksheet,
                 worksheet,
@@ -502,6 +570,25 @@ class TransformChecksheetBLHDStep:
                 valid_columns.append(col_index)
 
         return valid_columns
+
+    @classmethod
+    def _determine_transaction_start_column(
+        cls,
+        worksheet: Any,
+        value_worksheet: Any,
+    ) -> int:
+        # Some historical HD workbooks begin transactions in Q rather than R.
+        # The date row is authoritative business data, so using it avoids
+        # mistaking labels, notes, or other non-date content for a Q layout.
+        q_date_value = cls._source_value(
+            value_worksheet,
+            worksheet,
+            row=cls.TRANSACTION_DATE_ROW,
+            column=cls.ALTERNATE_TRANSACTION_COL,
+        )
+        if cls._coerce_date(q_date_value) is not None:
+            return cls.ALTERNATE_TRANSACTION_COL
+        return cls.FIRST_TRANSACTION_COL
 
     @staticmethod
     def _combine_measure_point(val_g: Any, val_h: Any) -> Optional[str]:
@@ -538,7 +625,9 @@ class TransformChecksheetBLHDStep:
     @classmethod
     def _merge_transaction(
         cls,
-        transaction_by_key: Dict[Tuple[str, date, str, int], Dict[str, Any]],
+        transaction_by_key: Dict[
+            Tuple[str, date, str, int, int], Dict[str, Any]
+        ],
         incoming: Dict[str, Any],
     ) -> None:
         """
@@ -546,7 +635,13 @@ class TransformChecksheetBLHDStep:
 
         Transaction identity during transformation is:
 
-            (vpo_code, date, serial_no_m_last4, source_master_index)
+            (
+                vpo_code,
+                date,
+                serial_no_m_last4,
+                source_master_index,
+                measurement_occurrence_no,
+            )
 
         source_master_index is a temporary workbook-local master identity
         (see class docstring point 6) and is intentionally not a final
@@ -578,6 +673,7 @@ class TransformChecksheetBLHDStep:
             "date",
             "serial_no",
             "serial_no_m_last4",
+            "measurement_occurrence_no",
             "value",
         )
 
@@ -592,6 +688,7 @@ class TransformChecksheetBLHDStep:
             incoming["date"],
             str(incoming["serial_no_m_last4"]),
             source_master_index,
+            int(incoming["measurement_occurrence_no"]),
         )
         existing = transaction_by_key.get(key)
         if existing is None:
@@ -757,23 +854,18 @@ class TransformChecksheetBLHDStep:
                 "Checksheet filename must match "
                 "VehicleModel_PartsCode_OPNO_Anything.xlsx"
             )
-        for group_name, segment_name in (
-            ("vehicle_model", "VehicleModel"),
-            ("parts_code", "PartsCode"),
-            ("op_no", "OPNO"),
+        for group_name, segment_name, pattern, allowed_characters in (
+            ("vehicle_model", "VehicleModel", r"[A-Za-z0-9]+", "A-Z, a-z, and 0-9"),
+            ("parts_code", "PartsCode", r"[A-Za-z0-9-]+", "A-Z, a-z, 0-9, and -"),
+            ("op_no", "OPNO", r"OP[0-9]+", "OP followed by digits (0-9)"),
         ):
             value = match.group(group_name)
-            if re.fullmatch(r"[A-Za-z0-9]+", value) is None:
+            if re.fullmatch(pattern, value) is None:
                 raise ValueError(
                     f"Invalid checksheet filename segment '{segment_name}': "
                     f"value '{value}' in filename '{file_name}' must contain "
-                    "only A-Z, a-z, and 0-9"
+                    f"only {allowed_characters}"
                 )
-        if not match.group("op_no").upper().startswith("OP"):
-            raise ValueError(
-                "Checksheet filename must match "
-                "VehicleModel_PartsCode_OPNO_Anything.xlsx"
-            )
         return {
             "vehicle_model": match.group("vehicle_model"),
             "parts_code": match.group("parts_code"),

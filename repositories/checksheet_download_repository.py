@@ -70,22 +70,18 @@ class ChecksheetDownloadRepository:
             raise ValueError(
                 "Checksheet filename must match VehicleModel_PartsCode_OPNO_Anything.xlsm"
             )
-        for group_name, segment_name in (
-            ("vehicle_model", "VehicleModel"),
-            ("parts_code", "PartsCode"),
-            ("op_no", "OPNO"),
+        for group_name, segment_name, pattern, allowed_characters in (
+            ("vehicle_model", "VehicleModel", r"[A-Za-z0-9]+", "A-Z, a-z, and 0-9"),
+            ("parts_code", "PartsCode", r"[A-Za-z0-9-]+", "A-Z, a-z, 0-9, and -"),
+            ("op_no", "OPNO", r"OP[0-9]+", "OP followed by digits (0-9)"),
         ):
             value = match.group(group_name)
-            if re.fullmatch(r"[A-Za-z0-9]+", value) is None:
+            if re.fullmatch(pattern, value) is None:
                 raise ValueError(
                     f"Invalid checksheet filename segment '{segment_name}': "
                     f"value '{value}' in filename '{file_name}' must contain "
-                    "only A-Z, a-z, and 0-9"
+                    f"only {allowed_characters}"
                 )
-        if not match.group("op_no").upper().startswith("OP"):
-            raise ValueError(
-                "Checksheet filename must match VehicleModel_PartsCode_OPNO_Anything.xlsm"
-            )
         return {
             "vehicle_model": match.group("vehicle_model"),
             "parts_code": match.group("parts_code"),

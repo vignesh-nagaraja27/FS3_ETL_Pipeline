@@ -143,6 +143,7 @@ class MeasurementRepository:
         "pi_no",
         "serial_no",
         "serial_no_m_last4",
+        "measurement_occurrence_no",
         "eng_no",
         "value",
         "watch_id",
@@ -155,7 +156,7 @@ class MeasurementRepository:
         "date",
         "serial_no_m_last4",
         "pi_no",
-        "watch_id",
+        "measurement_occurrence_no",
     }
 
     def __init__(self, connection: _ConnectionProtocol):
@@ -1359,7 +1360,7 @@ class MeasurementRepository:
         )
 
         prepared_incoming: Dict[
-            Tuple[date, str, int],
+            Tuple[date, str, int, int],
             Dict[str, Any],
         ] = {}
 
@@ -1373,6 +1374,12 @@ class MeasurementRepository:
             )
 
             pi_no_raw = rec.get("pi_no")
+            occurrence_no_raw = rec.get("measurement_occurrence_no")
+
+            if occurrence_no_raw is None:
+                raise ValueError(
+                    "transaction record requires measurement_occurrence_no"
+                )
 
             if (
                 dt_val is None
@@ -1382,11 +1389,19 @@ class MeasurementRepository:
                 continue
 
             pi_no = int(pi_no_raw)
+            occurrence_no = int(occurrence_no_raw)
+            if occurrence_no <= 0:
+                raise ValueError(
+                    "transaction measurement_occurrence_no must be greater than zero"
+                )
 
+            # Rechecks share date, serial, and PI. The occurrence dimension
+            # prevents synchronization from replacing an earlier event.
             business_key = (
                 dt_val,
                 serial_last4,
                 pi_no,
+                occurrence_no,
             )
 
             prepared_incoming[business_key] = dict(rec)
@@ -1403,6 +1418,7 @@ class MeasurementRepository:
                 "op_no_2nd",
                 "op_no_3rd",
                 "pi_no",
+                "measurement_occurrence_no",
                 "value",
                 "eng_no",
                 "watch_id",
@@ -1436,7 +1452,7 @@ class MeasurementRepository:
             existing_db_rows = cur.fetchall()
 
             existing_db_map: Dict[
-                Tuple[date, str, int],
+                Tuple[date, str, int, int],
                 Dict[str, Any],
             ] = {}
 
@@ -1449,17 +1465,26 @@ class MeasurementRepository:
                     if row[9] is not None
                     else None
                 )
+                db_occurrence_no = (
+                    int(row[10])
+                    if row[10] is not None
+                    else None
+                )
 
                 if (
                     db_dt
                     and db_last4
                     and db_pi_no is not None
+                    and db_occurrence_no is not None
                 ):
+                    # Database and incoming maps use the complete transaction
+                    # identity so each recheck is compared independently.
                     existing_db_map[
                         (
                             db_dt,
                             db_last4,
                             db_pi_no,
+                            db_occurrence_no,
                         )
                     ] = {
                         col: val
@@ -1482,12 +1507,14 @@ class MeasurementRepository:
                 if not is_partial_master
                 else set()
             )
+            transaction_audit_logs: List[Dict[str, Any]] = []
 
             for del_key in keys_to_delete:
                 (
                     del_date,
                     del_last4,
                     del_pi_no,
+                    del_occurrence_no,
                 ) = del_key
 
                 del_sql = """
@@ -1497,7 +1524,8 @@ class MeasurementRepository:
                       AND watch_id = %s
                       AND date = %s
                       AND serial_no_m_last4 = %s
-                      AND pi_no = %s;
+                      AND pi_no = %s
+                      AND measurement_occurrence_no = %s;
                 """
 
                 cur.execute(
@@ -1509,16 +1537,42 @@ class MeasurementRepository:
                         del_date,
                         del_last4,
                         del_pi_no,
+                        del_occurrence_no,
                     ),
                 )
+                deleted_record = existing_db_map[del_key]
+                transaction_audit_logs.append(
+                    {
+                        "version": version_value,
+                        "watch_id": watch_id,
+                        "file_version_id": file_version_id,
+                        "file_name": file_name,
+                        "file_hash": file_hash,
+                        "vpo_code": vpo_code,
+                        "pi_no": del_pi_no,
+                        "change_key": self._transaction_audit_key(del_key),
+                        "old_value": self._normalize_nullable_text(
+                            deleted_record.get("value")
+                        ),
+                        "new_value": None,
+                        "change_type": "TRANSACTION_DELETE",
+                        "remarks": (
+                            "Deleted measurement event absent from the "
+                            "current source workbook"
+                        ),
+                        "insert_id": insert_id,
+                    }
+                )
 
-            for _, inc_rec in prepared_incoming.items():
+            for business_key, inc_rec in prepared_incoming.items():
                 LOGGER.info(
                     f"[TX INSERT] "
                     f"serial={inc_rec.get('serial_no')} "
                     f"serial_last4="
                     f"{inc_rec.get('serial_no_m_last4')} "
                     f"pi_no={inc_rec.get('pi_no')} "
+                    f"measurement_occurrence_no="
+                    f"{inc_rec.get('measurement_occurrence_no')} "
                     f"value={inc_rec.get('value')}",
                     pipeline_type="CHECKSHEET",
                 )
@@ -1532,7 +1586,70 @@ class MeasurementRepository:
                     file_version_id=file_version_id,
                 )
 
+                existing_record = existing_db_map.get(business_key)
+                if existing_record is None:
+                    change_type = "TRANSACTION_INSERT"
+                    old_value = None
+                elif any(
+                    self._normalize_nullable_text(existing_record.get(column))
+                    != self._normalize_nullable_text(inc_rec.get(column))
+                    for column in self._TRANSACTION_BUSINESS_COLUMNS
+                    if column
+                    not in {
+                        "version",
+                        "vpo_code",
+                        "date",
+                        "serial_no_m_last4",
+                        "pi_no",
+                        "measurement_occurrence_no",
+                        "watch_id",
+                        "file_version_id",
+                    }
+                ):
+                    change_type = "TRANSACTION_UPDATE"
+                    old_value = self._normalize_nullable_text(
+                        existing_record.get("value")
+                    )
+                else:
+                    continue
+
+                transaction_audit_logs.append(
+                    {
+                        "version": version_value,
+                        "watch_id": watch_id,
+                        "file_version_id": file_version_id,
+                        "file_name": file_name,
+                        "file_hash": file_hash,
+                        "vpo_code": vpo_code,
+                        "pi_no": int(inc_rec["pi_no"]),
+                        "change_key": self._transaction_audit_key(business_key),
+                        "old_value": old_value,
+                        "new_value": self._normalize_nullable_text(
+                            inc_rec.get("value")
+                        ),
+                        "change_type": change_type,
+                        "remarks": (
+                            "Synchronized measurement event using occurrence-aware "
+                            "transaction identity"
+                        ),
+                        "insert_id": insert_id,
+                    }
+                )
+
+            self._insert_audit_logs(cur, transaction_audit_logs)
+
         return len(transaction_records)
+
+    @staticmethod
+    def _transaction_audit_key(
+        business_key: Tuple[date, str, int, int],
+    ) -> str:
+        """Build an audit key that distinguishes rechecks against the same PI."""
+        transaction_date, serial_last4, pi_no, occurrence_no = business_key
+        return (
+            f"transaction:{transaction_date.isoformat()}:{serial_last4}:"
+            f"{pi_no}:{occurrence_no}"
+        )
 
     def _upsert_single_transaction(
         self,
@@ -1553,7 +1670,7 @@ class MeasurementRepository:
                 date,
                 serial_no_m_last4,
                 pi_no,
-                watch_id,
+                measurement_occurrence_no,
             )
         """
 
@@ -1589,6 +1706,11 @@ class MeasurementRepository:
         if values.get("pi_no") is not None:
             values["pi_no"] = int(
                 values["pi_no"]
+            )
+
+        if values.get("measurement_occurrence_no") is not None:
+            values["measurement_occurrence_no"] = int(
+                values["measurement_occurrence_no"]
             )
 
         if values.get("date") is not None:
@@ -1630,7 +1752,7 @@ class MeasurementRepository:
                 date,
                 serial_no_m_last4,
                 pi_no,
-                watch_id
+                measurement_occurrence_no
             )
             DO UPDATE SET
                 {},
