@@ -189,9 +189,8 @@ configs/
   "version": "07106000",
   "max_workers": 2,
   "enabled": true,
-  "ignore_file_prefixes": [
-    "E-NR-BLOCK"
-  ],
+  "enr_block_enabled": true,
+  "ignore_file_prefixes": [],
   "parser": {
     "file_type": "excel",
     "header_row": null,
@@ -244,10 +243,18 @@ A machine can exclude files before classification and processing:
 
 | Filename | Result |
 |---|---|
-| `E-NR-BLOCK_001.xls` | Ignored |
-| `E-NR-BLOCK_RC.xlsx` | Ignored |
+| `E-NR-BLOCK_連続_OP060_TP03_20260330090500.xls` | Specialized parser when KTS-7106 opt-in is enabled |
+| `E-NR-BLOCK_RC.xlsx` | Rejected for KTS-7106 when opt-in is enabled |
 | `RC_001.xls` | Processed |
 | `GT3_001.xls` | Processed |
+
+For KTS-7106 with `enr_block_enabled: true`, all `.xls` filenames starting with `E-NR`
+files enter the specialized parser, even if `E-NR-BLOCK` appears in
+`ignore_file_prefixes`. Both `E-NR-BLOCK_連続...` and `E-NR-BLOCK連続...`
+are accepted, and the vehicle/parts are always `E-NR`/`BL`.
+Other E-NR extensions are rejected. A valid
+filename must have a serial segment followed by a `yyyyMMddHHmmss` timestamp
+whose year is **2026**. Other years are logged and skipped before processing.
 
 ## Processing Lifecycle
 
@@ -299,6 +306,70 @@ The Load step resolves or creates the measurement master record and inserts the 
 - Failed files are moved to `_NG`, marked `FAILED`, and registered in the DLQ for operator review.
 
 ## Machine-Specific Parsing
+
+### KTS-7106 E-NR-BLOCK master and transaction flow
+
+This path applies only to opted-in KTS-7106 E-NR/BL measurement files.
+Other KTS-7106 files and machines retain their existing behavior.
+
+Before starting measurement watchers, import and commit all `.xlsm` workbooks in
+`enr_block_master_path` (configured as `C:\FS3\ENR-BL-Master`). Read the `BL用`
+sheet from row 4 onward, including hidden/filtered rows. Excel lock files
+(`~$...`) are ignored, and the workbooks are not modified.
+The same idempotent import is committed before each eligible E-NR file load,
+so workbook additions are available for matching. A failed master import
+prevents measurement processing.
+
+| Master column | `pre_m_cmm` field |
+|---|---|
+| E | `op_name` |
+| F | `op_no` |
+| J | `evaluation_item1` |
+| K | `reference_position` |
+| L | `measure_item` |
+| N | `measure_point` |
+| P | `specification` |
+| Q | `upper_limit` |
+| R | `lower_limit` |
+
+Each named master row is imported with `vehicle_model=E-NR`, `parts_code=BL`,
+the configured KTS-7106 version and machine ID, and `vpo_code=E-NR_BL_<op_no>`.
+The OP is normalized to three digits (`OP10` -> `OP010`, `OP20` -> `OP020`,
+`OP110` stays `OP110`). Values and labels come directly from the master
+workbook; there is no measurement-code-to-Japanese conversion. A `-` stays
+`-`, and a missing cell stays NULL. Rows missing E are logged and skipped;
+invalid OP numbers or missing master workbooks/sheets fail the load.
+
+Identical existing master rows are reused without changing their `measure_no`.
+New rows get the next number for their version/VPO under a transaction lock.
+Repeated identical rows within the master workbook each retain a separate
+master number. This import does not delete or rewrite pre-existing masters.
+
+Measurement `.xls` files are read from row 9 on the configured measurement
+sheet (currently the last sheet). Before registering or copying the file,
+check B3 on that same sheet: it must contain `定量`. Files with an empty B3
+or another label are logged and ignored, without saving their measurement
+data. The copied workbook is checked again before reading measurement rows.
+The independent master workbook import is unchanged.
+Column A is compared with
+`pre_m_cmm.op_name` using Unicode NFKC normalization, so half-width/full-width
+differences do not prevent a match. Column F supplies the transaction value.
+The old A/B/C/F presence rule and column-B code parsing no longer apply.
+Empty A/F cells and unmatched names are logged and skipped.
+Numeric column-F values use the cell's Excel fixed-decimal display format
+(for example, `0.0000` displays and saves `0.5787`, not the raw floating-point
+value `0.5786999999999978`). Text values remain unchanged. Unsupported numeric
+display formats fail explicitly instead of guessing a precision.
+
+For each matching master, save its version, machine, vehicle, parts, OPs, VPO,
+and `measure_no` into `pre_t_cmm`, together with the filename serial
+(`serial_no_m_last4`), filename datetime and column-F value. If several
+masters match the same name, save a transaction for **every** matching master.
+The existing transaction primary key prevents duplicate inserts on replay.
+Measurements never create masters or update master limits. Master import
+commits in a separate transaction before comparison; a failed measurement
+does not remove the imported masters. If no measurement matches, transaction
+loading fails and rolls back only the transaction batch.
 
 ### KTS-7106 `measure_point`
 

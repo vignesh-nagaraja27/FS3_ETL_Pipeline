@@ -57,9 +57,9 @@
       "stable_required_count": 3,
       "max_workers": 4,
       "enabled": true,
-      "ignore_file_prefixes": [
-        "E-NR-BLOCK"
-      ]
+      "enr_block_enabled": true,
+      "enr_block_master_path": "C:\\FS3\\ENR-BL-Master",
+      "ignore_file_prefixes": []
     },
     {
       "machine_id": "KTS-7898",

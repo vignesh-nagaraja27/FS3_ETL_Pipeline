@@ -28,12 +28,14 @@ from orchestrator.dispatcher import (
     PIPELINE_UNKNOWN,
 )
 from pipelines.pipeline_3d import Pipeline3D
+from steps.enr_block_master import EnrBlockMasterStep
 from pipelines.pipeline_checksheet import ChecksheetPipeline
 from repositories.checksheet_download_repository import ChecksheetDownloadRepository
 from repositories.file_version_repository import FileVersionRepository
 from repositories.processing_lock_repository import ProcessingLockRepository
 from utils.file_hash import generate_sha256
 from utils.logger import LOGGER
+from utils.enr_block import parse_enr_filename
 from utils.stability_checker import check_file_stability
 
 # File extensions we process. Anything else is ignored.
@@ -152,6 +154,17 @@ class JobRunner:
             self._register_machine(machine_config)
         for machine_config in self._checksheet_watch_directories:
             self._register_machine(machine_config)
+
+        for machine_config in self._config.get_watch_directories():
+            if (
+                machine_config.get("enabled", True)
+                and machine_config.get("machine_id") == "KTS-7106"
+                and machine_config.get("enr_block_enabled", False)
+            ):
+                EnrBlockMasterStep().run(
+                    DatabaseHandler(), machine_config, 0,
+                    dict(machine="KTS-7106", model="E-NR", part="BL", pipeline_type="3D_BL"),
+                )
 
         # Start one watcher thread per configured machine
         for machine_config in self._config.get_watch_directories():
@@ -530,13 +543,31 @@ class JobRunner:
                     continue
 
                 for file_path in source_path.rglob("*"):
+                    is_enr_block = (
+                        machine_id == "KTS-7106"
+                        and machine_config.get("enr_block_enabled", False)
+                        and file_path.name.startswith("E-NR")
+                    )
+                    if is_enr_block:
+                        if str(file_path) in seen_files:
+                            continue
+                        try:
+                            parse_enr_filename(file_path.name)
+                        except ValueError as exc:
+                            seen_files.add(str(file_path))
+                            LOGGER.warning(
+                                f"[MC:{machine_id}] E-NR-BLOCK file skipped: "
+                                f"{file_path.name}: {exc}",
+                                pipeline_type="SYSTEM",
+                            )
+                            continue
                     if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
                         continue
                     # Ignore configured filename prefixes
                     if any(
                         file_path.name.upper().startswith(prefix.upper())
                         for prefix in ignore_prefixes
-                    ):
+                    ) and not is_enr_block:
                         seen_files.add(str(file_path))
                         LOGGER.info(
                             f"[MC:{machine_id}] Ignoring file by prefix rule: {file_path.name}",

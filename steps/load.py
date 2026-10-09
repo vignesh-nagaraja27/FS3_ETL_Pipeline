@@ -48,10 +48,12 @@ produced by the Transform Step and persists them to the database in two stages:
 The UPSERT fix for that bug is preserved intact.
 """
 
+from collections import defaultdict
 from typing import List, Dict, Any, Optional, Tuple
 import zlib
 
 from utils.logger import LOGGER
+from utils.enr_block import normalize_enr_name
 
 
 # ── Table constants ──────────────────────────────────────────────────────────
@@ -126,6 +128,12 @@ class LoadStep:
         if not version:
             raise ValueError(
                 f"LOAD STEP: Version configuration is missing for machine {machine_id}."
+            )
+        if machine_id == "KTS-7106" and part_config.get("enr_block_flow", False):
+            if vehicle_model != "E-NR" or parts_code != "BL":
+                raise ValueError("E-NR-BLOCK loading requires vehicle_model=E-NR and parts_code=BL")
+            return self._load_enr_block(
+                conn, rows, version, log_id, context
             )
 
         committed = 0
@@ -238,6 +246,76 @@ class LoadStep:
             **context,
         )
         return committed
+
+    def _load_enr_block(
+        self, conn, rows: List[Dict[str, Any]],
+        version: str, log_id: int, context: dict,
+    ) -> int:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                    SELECT version, vpo_code, vehicle_model, parts_code, op_no,
+                           op_no_2nd, op_no_3rd, mc_no, measure_no, op_name
+                    FROM {TABLE_MASTER}
+                    WHERE version = %s AND vehicle_model = 'E-NR' AND parts_code = 'BL'
+                    ORDER BY vpo_code, measure_no;
+                """,
+                (version,),
+            )
+            by_name: Dict[str, List[tuple]] = defaultdict(list)
+            for master in cur.fetchall():
+                key = normalize_enr_name(master[9])
+                if key:
+                    by_name[key].append(master)
+            if not by_name:
+                raise ValueError(
+                    "No named E-NR/BL masters exist in pre_m_cmm for the configured version; "
+                    "import the BL用 workbook before matching measurements"
+                )
+
+            matched = 0
+            inserted = 0
+            for row in rows:
+                name = row.get("op_name")
+                masters = by_name.get(normalize_enr_name(name), [])
+                if not masters:
+                    LOGGER.warning(
+                        f"[LOG_ID:{log_id}] E-NR-BLOCK row has no matching master: "
+                        f"row={row.get('excel_row')}, op_name={name!r}",
+                        **context,
+                    )
+                    continue
+                measured_at = row.get("measurement_datetime")
+                serial = row.get("serial_no_m_last4")
+                value = row.get("measure_value")
+                if measured_at is None or measured_at.year != 2026 or not serial or value is None:
+                    raise ValueError(
+                        f"E-NR-BLOCK row {row.get('excel_row')} is missing its serial/value "
+                        "or a 2026 measurement datetime"
+                    )
+                for master in masters:
+                    cur.execute(
+                        f"""
+                            INSERT INTO {TABLE_TRANSACTION}
+                                (version, vpo_code, vehicle_model, parts_code, op_no,
+                                 op_no_2nd, op_no_3rd, mc_no, datetime, measure_no,
+                                 serial_no_m_last4, value, insert_date, update_date)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                            ON CONFLICT (vpo_code, datetime, measure_no) DO NOTHING;
+                        """,
+                        (*master[:8], measured_at, int(master[8]), str(serial), str(value)),
+                    )
+                    matched += 1
+                    inserted += int(cur.rowcount > 0)
+            if matched == 0:
+                raise ValueError("No E-NR-BLOCK measurement rows matched pre_m_cmm.op_name")
+            LOGGER.info(
+                f"[LOG_ID:{log_id}] E-NR-BLOCK transactions: "
+                f"matched={matched}, inserted={inserted}, duplicates={matched - inserted}",
+                **context,
+            )
+            return matched
 
     # ─────────────────────────────────────────────────────────────────────────
     # Private SQL executors — all accept a cursor, none manage connections
@@ -650,7 +728,7 @@ class LoadStep:
         measure_value: Any,
         log_id: int,
         context: dict,
-    ):
+    ) -> bool:
         """
         Inserts one measurement VALUE row into pre_t_cmm (the final transaction table).
         ON CONFLICT DO NOTHING makes this idempotent — safe for double-process scenarios.
@@ -673,10 +751,11 @@ class LoadStep:
             measurement_datetime,
             measure_no,
             serial_no_m_last4,
-            str(measure_value),
+            str(measure_value) if measure_value is not None else None,
         )
         LOGGER.info(
             f"[LOG_ID:{log_id}] INSERT TRANSACTION SQL: {sql.strip()} PARAMS={params}",
             **context,
         )
         cur.execute(sql, params)
+        return cur.rowcount > 0

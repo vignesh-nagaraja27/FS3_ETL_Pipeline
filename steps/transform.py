@@ -15,11 +15,15 @@ Parser settings like 'header_row', 'data_start_row', 'value_column_idx', and 'ex
 
 import math
 import re
+from decimal import Decimal, ROUND_HALF_UP, localcontext
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import pandas as pd
+import xlrd
+from xlrd.sheet import Sheet
 from utils.logger import LOGGER
+from utils.enr_block import parse_enr_filename
 
 
 class TransformStep:
@@ -27,8 +31,6 @@ class TransformStep:
     Parses a raw measurement file into a list of clean row dictionaries.
     Supports both CSV and Excel file formats as specified in machine_config["parser"].
     """
-
-    # OPTIONAL_FIELD_ALIASES removed — rely on parser positional indexes or exact headers
 
     def run(
         self,
@@ -132,19 +134,47 @@ class TransformStep:
             f"[LOG_ID:{log_id}] TRANSFORM STEP started. Reading '{file_path.name}' as '{file_type}'.",
             **context,
         )
+        is_enr_block_name = (
+            machine_id == "KTS-7106"
+            and part_config.get("enr_block_flow", False)
+            and file_path.name.startswith("E-NR")
+        )
+        if is_enr_block_name and file_path.suffix.lower() != ".xls":
+            LOGGER.warning(
+                f"[LOG_ID:{log_id}] E-NR-BLOCK file skipped because extension is not .xls: "
+                f"{file_path.name}",
+                **context,
+            )
+            raise ValueError("E-NR-BLOCK files must use the legacy .xls extension")
+
+        enr_block_metadata = None
+        if is_enr_block_name:
+            try:
+                enr_block_metadata = self._parse_enr_block_filename(file_path.name)
+            except ValueError as exc:
+                LOGGER.warning(
+                    f"[LOG_ID:{log_id}] Invalid E-NR-BLOCK filename "
+                    f"'{file_path.name}': {exc}",
+                    **context,
+                )
+                raise
+
         if machine_id == "KTS-7898":
             raw_df = pd.DataFrame()
         else:
             try:
-                raw_df = self._read_file(
-                    file_path,
-                    file_type,
-                    header_row,
-                    data_start_row,
-                    sheet_index,
-                    context,
-                    log_id,
-                )
+                if is_enr_block_name:
+                    raw_df = self._read_enr_block_file(file_path, sheet_index)
+                else:
+                    raw_df = self._read_file(
+                        file_path,
+                        file_type,
+                        header_row,
+                        data_start_row,
+                        sheet_index,
+                        context,
+                        log_id,
+                    )
             except Exception as e:
                 LOGGER.error(
                     f"[LOG_ID:{log_id}] TRANSFORM STEP: Failed to read '{file_path.name}'. Error: {e}",
@@ -159,7 +189,14 @@ class TransformStep:
                 f"Verify that 'data_start_row' ({data_start_row}) and the file format are correct "
                 f"in machine_config['parser']."
             )
-        if machine_id == "KTS-7106":
+        if is_enr_block_name:
+            rows = self._parse_enr_block_rows(
+                raw_df,
+                context,
+                log_id,
+                file_path.name,
+            )
+        elif machine_id == "KTS-7106":
             rows = self._parse_kts7106(
                 raw_df,
                 part_config,
@@ -183,7 +220,9 @@ class TransformStep:
                 context,
                 log_id,
             )
-        if machine_id == "KTS-7898":
+        if enr_block_metadata is not None:
+            serial_no_m_last4 = enr_block_metadata["serial_number"]
+        elif machine_id == "KTS-7898":
             serial_no_m_last4 = self._derive_kts7898_serial_no(file_path.name)
         else:
             serial_no_m_last4 = self._derive_serial_no_m_last4_from_filename(
@@ -192,7 +231,9 @@ class TransformStep:
         if serial_no_m_last4:
             for r in rows:
                 r["serial_no_m_last4"] = serial_no_m_last4
-        if machine_id == "KTS-7898":
+        if enr_block_metadata is not None:
+            measurement_datetime = enr_block_metadata["measurement_datetime"]
+        elif machine_id == "KTS-7898":
             measurement_datetime = self._derive_kts7898_datetime(file_path.name)
         else:
             measurement_datetime = self._derive_measurement_datetime_from_filename(
@@ -204,6 +245,125 @@ class TransformStep:
 
         LOGGER.info(
             f"[LOG_ID:{log_id}] TRANSFORM STEP: Parsed {len(rows)} measurement rows from '{file_path.name}'.",
+            **context,
+        )
+        return rows
+
+    @staticmethod
+    def _enr_b3_matches(sheet: Sheet) -> bool:
+        return (
+            sheet.nrows > 2
+            and sheet.ncols > 1
+            and "定量" in str(sheet.cell_value(2, 1))
+        )
+
+    def is_enr_quantitative_file(self, file_path: Path, sheet_index: int) -> bool:
+        workbook = xlrd.open_workbook(str(file_path))
+        try:
+            return self._enr_b3_matches(workbook.sheets()[sheet_index])
+        finally:
+            workbook.release_resources()
+
+    def _read_enr_block_file(self, file_path: Path, sheet_index: int) -> pd.DataFrame:
+        workbook = xlrd.open_workbook(str(file_path), formatting_info=True)
+        try:
+            sheet = workbook.sheets()[sheet_index]
+            if not self._enr_b3_matches(sheet):
+                raise ValueError(
+                    f"E-NR/BL measurement file is not eligible: "
+                    f"{file_path.name}, sheet={sheet.name}, B3 does not contain 定量"
+                )
+            records = []
+            for number in range(8, sheet.nrows):
+                values: List[Any] = list(sheet.row_values(number))
+                if len(values) > 5 and str(values[0]).strip():
+                    cell = sheet.cell(number, 5)
+                    if cell.ctype == xlrd.XL_CELL_NUMBER:
+                        format_index = cell.xf_index
+                        numeric_value = cell.value
+                        if format_index is None or not isinstance(numeric_value, (int, float)):
+                            raise ValueError(
+                                f"{file_path.name}, sheet={sheet.name}, F{number + 1}: "
+                                "numeric cell is missing its format index or numeric value"
+                            )
+                        number_format = workbook.format_map[
+                            workbook.xf_list[format_index].format_key
+                        ].format_str
+                        try:
+                            values[5] = self._format_enr_excel_number(
+                                numeric_value, number_format
+                            )
+                        except ValueError as exc:
+                            raise ValueError(
+                                f"{file_path.name}, sheet={sheet.name}, F{number + 1}: {exc}"
+                            ) from exc
+                records.append(values)
+            return pd.DataFrame(records)
+        finally:
+            workbook.release_resources()
+
+    @staticmethod
+    def _format_enr_excel_number(value: float, number_format: str) -> str:
+        # Excel's underscore directives reserve padding, not value characters.
+        pattern = re.sub(r"_.", "", number_format).strip()
+        match = re.fullmatch(r"0(?:\.(0+))?", pattern)
+        if match is None:
+            raise ValueError(
+                f"Unsupported E-NR column-F number format {number_format!r}; "
+                "cannot safely reproduce its Excel display"
+            )
+        places = len(match.group(1) or "")
+        decimal_value = Decimal(str(value))
+        with localcontext() as context:
+            context.prec = max(28, decimal_value.adjusted() + places + 2)
+            rounded = decimal_value.quantize(
+                Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP
+            )
+        if rounded.is_zero():
+            rounded = abs(rounded)
+        return format(rounded, f".{places}f")
+
+    def _parse_enr_block_filename(self, file_name: str) -> Dict[str, Any]:
+        serial_number, measurement_datetime = parse_enr_filename(file_name)
+        return {
+            "vehicle_model": "E-NR",
+            "parts_code": "BL",
+            "serial_number": serial_number,
+            "measurement_datetime": measurement_datetime,
+        }
+
+    def _parse_enr_block_rows(
+        self,
+        df: pd.DataFrame,
+        context: dict,
+        log_id: int,
+        file_name: str,
+    ) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+
+        for position, (_, row) in enumerate(df.iterrows()):
+            excel_row = position + 9
+            op_name = self._get_optional_string_by_pos(row, 0)
+            measure_value = self._get_optional_string_by_pos(row, 5)
+            if op_name is None or measure_value is None:
+                LOGGER.info(
+                    f"[LOG_ID:{log_id}] E-NR-BLOCK row skipped because column A or F "
+                    f"is empty: file='{file_name}', row={excel_row}",
+                    **context,
+                )
+                continue
+
+            rows.append(
+                {
+                    "op_name": op_name,
+                    "measure_value": measure_value,
+                    "excel_row": excel_row,
+                    "enr_block_flow": True,
+                }
+            )
+
+        LOGGER.info(
+            f"[LOG_ID:{log_id}] E-NR-BLOCK parser created {len(rows)} rows.",
             **context,
         )
         return rows
@@ -299,7 +459,7 @@ class TransformStep:
         self,
         file_path: Path,
         file_type: str,
-        header_row: int,
+        header_row: Optional[int],
         data_start_row: int,
         sheet_index: int,
         context: dict,

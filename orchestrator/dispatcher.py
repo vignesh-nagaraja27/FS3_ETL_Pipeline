@@ -14,6 +14,7 @@ The dispatcher never processes data itself — it only classifies and routes.
 FilePatternRepository. Checksheet classification uses ConfigLoader regex matching.
 """
 
+import re
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -21,6 +22,7 @@ from config_loader import ConfigLoader
 from pipelines.pipeline_3d import Pipeline3D
 from repositories.file_pattern_repository import FilePatternRepository
 from utils.logger import LOGGER
+from utils.enr_block import normalize_enr_op, parse_enr_filename
 
 try:
     from pipelines.pipeline_checksheet import PipelineChecksheet
@@ -54,6 +56,49 @@ class Dispatcher:
         self._file_pattern_repo = FilePatternRepository()
     def classify_from_watcher(self,file_path: Path,watch_config: dict,):
         pipeline_type = str(watch_config.get("pipeline_type", "")).strip()
+        machine_id = str(watch_config.get("machine_id", "")).strip()
+        if (
+            machine_id == "KTS-7106"
+            and watch_config.get("enr_block_enabled", False)
+            and file_path.name.startswith("E-NR")
+        ):
+            try:
+                parse_enr_filename(file_path.name)
+            except ValueError as exc:
+                LOGGER.warning(
+                    f"E-NR-BLOCK file skipped: {file_path.name}: {exc}",
+                    machine=machine_id,
+                    pipeline_type=PIPELINE_3D_BL,
+                )
+                return PIPELINE_UNKNOWN, None
+            routing_op_match = re.search(
+                r"(?:^|_)(OP\d{1,3})(?=[_-]|$)",
+                file_path.stem,
+                flags=re.IGNORECASE,
+            )
+            routing_op_no = (
+                normalize_enr_op(routing_op_match.group(1))
+                if routing_op_match is not None
+                else ""
+            )
+            LOGGER.info(
+                f"E-NR-BLOCK file accepted for specialized processing: {file_path.name}",
+                machine=machine_id,
+                model="E-NR",
+                part="BL",
+                op=routing_op_no,
+                pipeline_type=PIPELINE_3D_BL,
+            )
+            return PIPELINE_3D_BL, {
+                "machine_type": PIPELINE_3D_BL,
+                "file_pattern": "E-NR",
+                "vehicle_model": "E-NR",
+                "parts_code": "BL",
+                "side": None,
+                "op_no": routing_op_no,
+                "vpo_code": "",
+                "enr_block_flow": True,
+            }
         if pipeline_type in (PIPELINE_3D_HD,PIPELINE_3D_BL,PIPELINE_3D_CR,):
             match_3d = self._file_pattern_repo.find_match(file_path.name)
             return pipeline_type, match_3d

@@ -13,10 +13,12 @@ from db.db_handler import DatabaseHandler
 from steps.copy import CopyStep
 from steps.transform import TransformStep
 from steps.load import LoadStep
+from steps.enr_block_master import EnrBlockMasterStep
 from steps.finalize import FinalizeStep
 from state.status_manager import StatusManager
 from utils.logger import LOGGER
 from utils.path_helper import get_working_paths
+from utils.enr_block import parse_enr_filename
 
 
 class Pipeline3D:
@@ -67,6 +69,32 @@ class Pipeline3D:
             part=parts_code,
             op=op_no,
         )
+        is_enr_block = machine_id == "KTS-7106" and part_config.get("enr_block_flow", False)
+        if is_enr_block:
+            try:
+                parse_enr_filename(source_path.name)
+            except ValueError as exc:
+                LOGGER.warning(f"E-NR-BLOCK file skipped: {source_path.name}: {exc}", **context)
+                return
+            sheet_index = machine_config.get("parser", {}).get("excel_sheet_index", 0)
+            try:
+                is_quantitative = self._transform_step.is_enr_quantitative_file(
+                    source_path, sheet_index
+                )
+            except Exception:
+                LOGGER.error(
+                    f"E-NR/BL B3 eligibility check failed: {source_path.name}",
+                    exc_info=True,
+                    **context,
+                )
+                raise
+            if not is_quantitative:
+                LOGGER.info(
+                    f"E-NR/BL file ignored: {source_path.name}; "
+                    f"B3 on measurement sheet {sheet_index} does not contain 定量",
+                    **context,
+                )
+                return
 
         processing_path: Optional[Path] = None
         log_id: Optional[int] = None
@@ -206,6 +234,8 @@ class Pipeline3D:
             version = str(machine_config.get("version", "")).strip()
             if not version:
                 raise ValueError(f"Version is not configured for machine {machine_id}")
+            if is_enr_block:
+                EnrBlockMasterStep().run(self._db, machine_config, log_id, context)
             with self._db.get_connection() as conn:
                 committed = load_step.run(
                     rows=rows,
