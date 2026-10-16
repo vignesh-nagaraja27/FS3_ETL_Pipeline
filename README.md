@@ -43,6 +43,7 @@ The service monitors machine output folders, validates and transforms incoming E
 |---|---|---:|---:|---|
 | `KTSF-0453` | `3D_HD` | `04530000` | 4 | HD measurement processing |
 | `KTS-7106` | `3D_BL` | `07106000` | 2 | BL parsing, `measure_point`, and ignored filename prefixes |
+| `KTSF-0829` | `3D_CR` | `0829000` | 4 | Horizontal CSV blocks and per-measurement operation routing |
 
 Machine details are configuration values, not hard-coded application behavior. Machines can be added, disabled, or tuned in `configs/machines.json`.
 
@@ -306,6 +307,74 @@ The Load step resolves or creates the measurement master record and inserts the 
 - Failed files are moved to `_NG`, marked `FAILED`, and registered in the DLQ for operator review.
 
 ## Machine-Specific Parsing
+
+### KTSF-0829 horizontal CSV
+
+This machine uses the existing 3D pipeline with isolated filename classification,
+transformation and loading rules. Other machines retain their existing behavior.
+
+Filename format:
+
+```text
+vehicle_model_parts_code_OPxxx_measure_frequency_measure_position_serial_yyyyMMddHHmmss.csv
+RC_CR_OP060_定量_Rr_0025_20261007190854.csv
+```
+
+The filename is authoritative for datetime and serial number, including leading
+zeros. B/C are not used for identity. Only the first CSV row is loaded; additional
+nonempty rows are reported in a warning, not merged under the filename's primary
+key. Split multi-record files into individual measurement files with matching
+filenames before ingestion if all their records need to be loaded.
+
+Configure the actual source encoding and delimiter in `configs/machines.json`.
+The default is UTF-8 (optional BOM) and comma-delimited CSV. The first three cells
+are metadata, followed by repeating 11-cell blocks (D:N, O:Y, etc.).
+Parser column indices are zero-based positions in the first block:
+
+| First block cell | Target |
+|---|---|
+| F | Structured measurement name |
+| I | `pre_t_cmm.value`, preserved as text without float conversion |
+| K | `pre_m_cmm.specification` |
+| L | `pre_m_cmm.upper_limit` |
+| M | `pre_m_cmm.lower_limit` |
+
+For `060_030_P仕上研削_外径_P_1_Fr側Fr(360)`, the name is split into
+`op_no=OP060`, `op_no_2nd=30`, `evaluation_item1=P仕上研削`,
+`measure_item=外径`, `machining_item=P`, `measure_point=1`, and
+`measure_part=Fr側Fr(360)`. A third operation token before the evaluation item
+populates `op_no_3rd`; otherwise it is NULL. Missing optional segments are NULL,
+and underscores after the measurement point remain part of `measure_part`.
+Each measurement uses its own operation to construct its VPO code: a `065_...`
+measurement in the OP060 file loads under `RC_CR_OP065`.
+Frequency and position come from the filename and are saved on new masters.
+For KTSF-0829, `op_no_2nd` is stored as numeric text without an `OP` prefix
+or leading zeros: `070` becomes `70`, `010` becomes `10`, and `100` stays `100`.
+An empty second operation remains NULL. Primary and third operation formats
+are unchanged. Previously loaded rows are not automatically migrated; normalize
+their second operations before reprocessing to avoid creating separate masters
+under the corrected business key.
+
+Master identity is scoped by version and VPO code, then matched by operation,
+second/third operation, evaluation item, measure item, machining item,
+measure point, measure part and specification. Limits are compared separately:
+identical definitions reuse the existing `measure_no`; different limits update
+that same master only when the incoming datetime is newer than its latest
+transaction datetime. Older/equal-time measurements do not overwrite limits,
+but their historical values are still inserted.
+New definitions receive `MAX(measure_no) + 1` within their version/VPO scope,
+starting at 1. Transactions use that exact master measurement number.
+
+All affected operation scopes are transaction-locked in deterministic order,
+including existing masters, to serialize numbering and limit updates between
+workers. Master and transaction writes share the existing atomic transaction.
+The configured version stays `0829000`; operation changes affect the VPO code,
+not the version. Repeated business keys reuse the same master measurement number,
+as on KTS-7898. If their transaction key already exists, the first stored value
+is kept and the skipped incoming value is logged; the file is not rejected.
+Reprocessing the same transaction key also does not overwrite its stored value.
+Incomplete blocks and empty required fields still fail the file rather than
+silently dropping measurements.
 
 ### KTS-7106 E-NR-BLOCK master and transaction flow
 

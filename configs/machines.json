@@ -96,6 +96,33 @@
         "[0.校正]RC_GT3用",
         "[AZ]"
       ]
+    },
+    {
+      "machine_id": "KTSF-0829",
+      "description": "Marpos CMM - Produces 3次元 CR measurement files.",
+      "source_path": "C:\\FS3\\CMM\\MARPOS\\KTSF-0829",
+      "parser": {
+        "file_type": "csv",
+        "layout": "horizontal",
+        "encoding": "utf-8-sig",
+        "delimiter": ",",
+        "header_row": null,
+        "data_start_row": 0,
+        "measurement_block_width": 11,
+        "evaluation_item1_column_idx": 5,
+        "value_column_idx": 8,
+        "specification_column_idx": 10,
+        "upper_limit_column_idx": 11,
+        "lower_limit_column_idx": 12
+      },
+      "pipeline_type": "3D_CR",
+      "version": "0829000",
+      "poll_interval_sec": 5,
+      "stable_wait_sec": 2,
+      "stable_required_count": 3,
+      "max_workers": 4,
+      "enabled": true,
+      "ignore_file_prefixes": []
     }
   ],
   "conversion_watch": {

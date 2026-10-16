@@ -23,6 +23,7 @@ from pipelines.pipeline_3d import Pipeline3D
 from repositories.file_pattern_repository import FilePatternRepository
 from utils.logger import LOGGER
 from utils.enr_block import normalize_enr_op, parse_enr_filename
+from utils.ktsf0829 import parse_ktsf0829_filename
 
 try:
     from pipelines.pipeline_checksheet import PipelineChecksheet
@@ -57,6 +58,22 @@ class Dispatcher:
     def classify_from_watcher(self,file_path: Path,watch_config: dict,):
         pipeline_type = str(watch_config.get("pipeline_type", "")).strip()
         machine_id = str(watch_config.get("machine_id", "")).strip()
+        if machine_id == "KTSF-0829":
+            try:
+                metadata = parse_ktsf0829_filename(file_path.name)
+            except ValueError as exc:
+                LOGGER.warning(
+                    f"KTSF-0829 file skipped: {file_path.name}: {exc}",
+                    machine=machine_id,
+                    pipeline_type=PIPELINE_3D_CR,
+                )
+                return PIPELINE_UNKNOWN, None
+            return PIPELINE_3D_CR, {
+                **metadata,
+                "machine_type": PIPELINE_3D_CR,
+                "file_pattern": None,
+                "side": None,
+            }
         if (
             machine_id == "KTS-7106"
             and watch_config.get("enr_block_enabled", False)

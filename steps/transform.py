@@ -13,6 +13,7 @@ in isolation.
 Parser settings like 'header_row', 'data_start_row', 'value_column_idx', and 'excel_sheet_index' come from machine_config["parser"].
 """
 
+import csv
 import math
 import re
 from decimal import Decimal, ROUND_HALF_UP, localcontext
@@ -24,6 +25,10 @@ import xlrd
 from xlrd.sheet import Sheet
 from utils.logger import LOGGER
 from utils.enr_block import parse_enr_filename
+from utils.ktsf0829 import (
+    parse_ktsf0829_filename,
+    parse_ktsf0829_measurement_name,
+)
 
 
 class TransformStep:
@@ -71,6 +76,22 @@ class TransformStep:
         )
 
         parser = machine_config.get("parser", {})
+        if machine_id == "KTSF-0829":
+            try:
+                rows = self._parse_ktsf0829(file_path, parser, context, log_id)
+            except (OSError, UnicodeError, csv.Error, ValueError):
+                LOGGER.error(
+                    f"[LOG_ID:{log_id}] KTSF-0829 transform failed: {file_path.name}",
+                    exc_info=True,
+                    **context,
+                )
+                raise
+            LOGGER.info(
+                f"[LOG_ID:{log_id}] TRANSFORM STEP: Parsed {len(rows)} "
+                f"measurement blocks from '{file_path.name}'.",
+                **context,
+            )
+            return rows
         file_type = parser.get("file_type", "csv").lower()
         header_row = parser.get("header_row", 0)
         data_start_row = parser.get("data_start_row", 1)
@@ -247,6 +268,75 @@ class TransformStep:
             f"[LOG_ID:{log_id}] TRANSFORM STEP: Parsed {len(rows)} measurement rows from '{file_path.name}'.",
             **context,
         )
+        return rows
+
+    def _parse_ktsf0829(
+        self, file_path: Path, parser: dict, context: dict, log_id: int
+    ) -> List[Dict[str, Any]]:
+        metadata = parse_ktsf0829_filename(file_path.name)
+        block_width = parser.get("measurement_block_width", 11)
+        name_column = parser.get("evaluation_item1_column_idx", 5)
+        columns = {
+            "measure_value": parser.get("value_column_idx", 8),
+            "specification": parser.get("specification_column_idx", 10),
+            "upper_limit": parser.get("upper_limit_column_idx", 11),
+            "lower_limit": parser.get("lower_limit_column_idx", 12),
+        }
+        if block_width != 11 or name_column != 5 or columns != {
+            "measure_value": 8,
+            "specification": 10,
+            "upper_limit": 11,
+            "lower_limit": 12,
+        }:
+            raise ValueError("KTSF-0829 requires 11-cell blocks and F/I/K/L/M mappings")
+        with file_path.open(
+            "r", encoding=parser.get("encoding", "utf-8-sig"), newline=""
+        ) as source:
+            reader = csv.reader(source, delimiter=parser.get("delimiter", ","), strict=True)
+            cells = next(reader, [])
+            extra_rows = sum(1 for record in reader if any(cell.strip() for cell in record))
+        if extra_rows:
+            LOGGER.warning(
+                f"[LOG_ID:{log_id}] KTSF-0829: {extra_rows} additional CSV rows "
+                "ignored; filename identity applies to the first row only.",
+                **context,
+            )
+        cells = [cell.strip() for cell in cells]
+        while cells and not cells[-1] and (len(cells) - 3) % block_width:
+            cells.pop()
+        if len(cells) < 14 or (len(cells) - 3) % block_width:
+            raise ValueError(
+                "KTSF-0829 first row must contain 3 leading cells followed by "
+                "complete 11-cell measurement blocks"
+            )
+        rows = []
+        for offset in range(0, len(cells) - 3, block_width):
+            name = cells[name_column + offset]
+            if not name:
+                raise ValueError(f"KTSF-0829 block {offset // block_width + 1}: empty name")
+            row = {**metadata, **parse_ktsf0829_measurement_name(name)}
+            row["vpo_code"] = (
+                f"{row['vehicle_model']}_{row['parts_code']}_{row['op_no']}"
+            )
+            for field, column in columns.items():
+                value = cells[column + offset]
+                if not value:
+                    raise ValueError(
+                        f"KTSF-0829 block {offset // block_width + 1}: empty {field}"
+                    )
+                row[field] = value
+            for field in (
+                "evaluation_item1", "measure_item", "machining_item", "measure_point",
+                "measure_part", "specification", "upper_limit", "lower_limit", "measure_value",
+            ):
+                value = row.get(field)
+                max_length = 50 if field == "measure_value" else 100
+                if value is not None and len(value) > max_length:
+                    raise ValueError(
+                        f"KTSF-0829 block {offset // block_width + 1}: "
+                        f"{field} exceeds {max_length} characters"
+                    )
+            rows.append(row)
         return rows
 
     @staticmethod

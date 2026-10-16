@@ -129,6 +129,8 @@ class LoadStep:
             raise ValueError(
                 f"LOAD STEP: Version configuration is missing for machine {machine_id}."
             )
+        if machine_id == "KTSF-0829":
+            return self._load_ktsf0829(conn, rows, version, log_id, context)
         if machine_id == "KTS-7106" and part_config.get("enr_block_flow", False):
             if vehicle_model != "E-NR" or parts_code != "BL":
                 raise ValueError("E-NR-BLOCK loading requires vehicle_model=E-NR and parts_code=BL")
@@ -246,6 +248,158 @@ class LoadStep:
             **context,
         )
         return committed
+
+    def _load_ktsf0829(
+        self, conn, rows: List[Dict[str, Any]], version: str, log_id: int, context: dict
+    ) -> int:
+        if not rows:
+            raise ValueError("KTSF-0829 loading requires at least one measurement")
+        identity_fields = (
+            "op_no", "op_no_2nd", "op_no_3rd", "evaluation_item1", "measure_item",
+            "machining_item", "measure_point", "measure_part", "specification",
+        )
+        for index, row in enumerate(rows, 1):
+            for field in (
+                "vehicle_model", "parts_code", "op_no", "vpo_code", "evaluation_item1",
+                "measure_item", "specification", "upper_limit", "lower_limit",
+                "measure_value", "measurement_datetime", "serial_no", "serial_no_m_last4",
+            ):
+                if row.get(field) is None or row.get(field) == "":
+                    raise ValueError(f"KTSF-0829 row {index}: missing {field}")
+
+        with conn.cursor() as cur:
+            # All files lock operation scopes in the same order to avoid deadlocks.
+            lock_keys = {
+                self._advisory_lock_key(row["vehicle_model"], row["parts_code"], row["op_no"])
+                for row in rows
+            }
+            for lock_key in sorted(lock_keys):
+                cur.execute("SELECT pg_advisory_xact_lock(%s);", (lock_key,))
+            for index, row in enumerate(rows, 1):
+                row_context = {
+                    **context,
+                    "model": row["vehicle_model"],
+                    "part": row["parts_code"],
+                    "op": row["op_no"],
+                }
+                try:
+                    measure_no = self._resolve_ktsf0829_measure_no(
+                        cur, row, version, identity_fields, log_id, row_context
+                    )
+                    row["measure_no"] = measure_no
+                    row["version"] = version
+                    cur.execute(
+                        f"""
+                            INSERT INTO {TABLE_TRANSACTION}
+                                (version, mc_no, vpo_code, vehicle_model, parts_code,
+                                 op_no, op_no_2nd, op_no_3rd, datetime, measure_no,
+                                 serial_no, serial_no_m_last4, value, insert_date, update_date)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                                    %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                            ON CONFLICT (vpo_code, datetime, measure_no) DO NOTHING;
+                        """,
+                        (
+                            version, "KTSF-0829", row["vpo_code"], row["vehicle_model"],
+                            row["parts_code"], row["op_no"], row.get("op_no_2nd"),
+                            row.get("op_no_3rd"), row["measurement_datetime"], measure_no,
+                            row["serial_no"], row["serial_no_m_last4"], row["measure_value"],
+                        ),
+                    )
+                    if cur.rowcount == 0:
+                        LOGGER.info(
+                            f"[LOG_ID:{log_id}] KTSF-0829 row {index}: "
+                            f"transaction already exists for vpo_code={row['vpo_code']}, "
+                            f"datetime={row['measurement_datetime']}, measure_no={measure_no}; "
+                            f"keeping the stored value, skipping incoming {row['measure_value']!r}.",
+                            **row_context,
+                        )
+                except Exception:
+                    LOGGER.error(
+                        f"[LOG_ID:{log_id}] KTSF-0829 row {index} load failed; "
+                        "rolling back the entire file.",
+                        exc_info=True,
+                        **row_context,
+                    )
+                    raise
+        LOGGER.info(
+            f"[LOG_ID:{log_id}] KTSF-0829 atomic batch: {len(rows)} measurements processed.",
+            **context,
+        )
+        return len(rows)
+
+    def _resolve_ktsf0829_measure_no(
+        self, cur, row: dict, version: str, identity_fields: Tuple[str, ...],
+        log_id: int, context: dict,
+    ) -> int:
+        conditions = " AND ".join(
+            f"{field} IS NOT DISTINCT FROM %s::text" for field in identity_fields
+        )
+        cur.execute(
+            f"""
+                SELECT measure_no, upper_limit, lower_limit
+                FROM {TABLE_MASTER}
+                WHERE version = %s AND vpo_code = %s
+                  AND vehicle_model = %s AND parts_code = %s AND {conditions}
+                ORDER BY measure_no
+                LIMIT 1;
+            """,
+            (
+                version, row["vpo_code"], row["vehicle_model"], row["parts_code"],
+                *(row.get(field) for field in identity_fields),
+            ),
+        )
+        existing = cur.fetchone()
+        if existing:
+            measure_no = int(existing[0])
+            if (existing[1], existing[2]) != (row["upper_limit"], row["lower_limit"]):
+                latest_datetime = self._get_latest_measurement_datetime(
+                    cur, version, row["vpo_code"], row["vehicle_model"],
+                    row["parts_code"], row["op_no"], measure_no,
+                )
+                if latest_datetime is None or row["measurement_datetime"] > latest_datetime:
+                    self._update_master_limits(
+                        cur, version, row["vpo_code"], row["vehicle_model"],
+                        row["parts_code"], row["op_no"], measure_no, row["upper_limit"],
+                        row["lower_limit"], log_id, context,
+                    )
+                else:
+                    LOGGER.info(
+                        f"[LOG_ID:{log_id}] KTSF-0829 master {measure_no}: "
+                        f"keeping limits from {latest_datetime}; incoming "
+                        f"{row['measurement_datetime']}. Historical value retained.",
+                        **context,
+                    )
+            return measure_no
+        cur.execute(
+            f"SELECT COALESCE(MAX(measure_no), 0) FROM {TABLE_MASTER} "
+            "WHERE version = %s AND vpo_code = %s;",
+            (version, row["vpo_code"]),
+        )
+        measure_no = int(cur.fetchone()[0]) + 1
+        cur.execute(
+            f"""
+                INSERT INTO {TABLE_MASTER}
+                    (version, mc_no, vpo_code, vehicle_model, parts_code, measure_no,
+                     op_no, op_no_2nd, op_no_3rd, evaluation_item1, measure_item,
+                     machining_item, measure_point, measure_part, specification,
+                     upper_limit, lower_limit, measure_frequency, measure_position,
+                     insert_date, update_date)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+            """,
+            (
+                version, "KTSF-0829", row["vpo_code"], row["vehicle_model"],
+                row["parts_code"], measure_no,
+                *(row.get(field) for field in identity_fields),
+                row["upper_limit"], row["lower_limit"], row.get("measure_frequency"),
+                row.get("measure_position"),
+            ),
+        )
+        LOGGER.info(
+            f"[LOG_ID:{log_id}] KTSF-0829 INSERT MASTER: measure_no={measure_no}",
+            **context,
+        )
+        return measure_no
 
     def _load_enr_block(
         self, conn, rows: List[Dict[str, Any]],
