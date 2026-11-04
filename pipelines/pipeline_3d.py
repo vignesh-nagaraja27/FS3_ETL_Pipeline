@@ -132,6 +132,7 @@ class Pipeline3D:
                     parts_code=parts_code,
                     op_no=op_no,
                     pid=os.getpid(),
+                    watch_id=machine_id,
                 )
             except Exception as e:
                 LOGGER.error(
@@ -162,6 +163,7 @@ class Pipeline3D:
             )
 
             # Update DB with finalized size
+            stable_size = 0
             try:
                 stable_size = processing_path.stat().st_size
                 self._status.update_file_size(log_id, stable_size)
@@ -188,6 +190,8 @@ class Pipeline3D:
                 part=parts_code,
                 op=op_no,
                 failed_step="COPY",
+                file_path=str(source_path),
+                file_name=source_path.name,
             )
             return
 
@@ -206,16 +210,7 @@ class Pipeline3D:
             LOGGER.error(
                 f"[LOG_ID:{log_id}] TRANSFORM failed: {e}", exc_info=True, **context
             )
-            self._status.set_failed(
-                log_id,
-                exc=e,
-                machine=machine_id,
-                model=vehicle_model,
-                part=parts_code,
-                op=op_no,
-                failed_step="TRANSFORM",
-            )
-            self._finalize_step.run_failure(
+            ng_file_path = self._finalize_step.run_failure(
                 source_path,
                 processing_path or Path(""),
                 machine_id,
@@ -224,6 +219,17 @@ class Pipeline3D:
                 op_no,
                 log_id,
                 pipeline_type,
+            )
+            self._status.set_failed(
+                log_id,
+                exc=e,
+                machine=machine_id,
+                model=vehicle_model,
+                part=parts_code,
+                op=op_no,
+                failed_step="TRANSFORM",
+                file_path=str(ng_file_path),
+                file_name=source_path.name,
             )
             return
 
@@ -249,9 +255,27 @@ class Pipeline3D:
             if committed == 0:
                 raise ValueError("No rows committed to database.")
 
+            # Register download in pre_l_3d_dldate only AFTER LOAD commits
+            self._copy_step.register_download(
+                source_path.name,
+                stable_size or (processing_path.stat().st_size if processing_path and processing_path.exists() else 0),
+                parts_code,
+                context,
+            )
+
         except Exception as e:
             LOGGER.error(
                 f"[LOG_ID:{log_id}] LOAD failed: {e}", exc_info=True, **context
+            )
+            ng_file_path = self._finalize_step.run_failure(
+                source_path,
+                processing_path or Path(""),
+                machine_id,
+                vehicle_model,
+                parts_code,
+                op_no,
+                log_id,
+                pipeline_type,
             )
             self._status.set_failed(
                 log_id,
@@ -261,16 +285,8 @@ class Pipeline3D:
                 part=parts_code,
                 op=op_no,
                 failed_step="LOAD",
-            )
-            self._finalize_step.run_failure(
-                source_path,
-                processing_path or Path(""),
-                machine_id,
-                vehicle_model,
-                parts_code,
-                op_no,
-                log_id,
-                pipeline_type,
+                file_path=str(ng_file_path),
+                file_name=source_path.name,
             )
             return
 

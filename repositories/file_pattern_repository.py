@@ -1,14 +1,26 @@
+import threading
+import time
 from db.db_handler import DatabaseHandler
 
 
 class FilePatternRepository:
+    # Refresh active file patterns from DB every 30 seconds so newly added rules
+    # in fs3.pre_m_file_pattern take effect without restarting the ETL service.
+    CACHE_TTL_SEC = 30.0
+
     def __init__(self):
         self._db = DatabaseHandler()
         self._patterns = None
+        self._last_loaded_at = 0.0
+        self._lock = threading.Lock()
 
-    def get_all_active_patterns(self):
-
-        if self._patterns is not None:
+    def get_all_active_patterns(self, force_refresh: bool = False):
+        now = time.monotonic()
+        if (
+            not force_refresh
+            and self._patterns is not None
+            and (now - self._last_loaded_at) < self.CACHE_TTL_SEC
+        ):
             return self._patterns
 
         sql = """
@@ -25,10 +37,20 @@ class FilePatternRepository:
             ORDER BY LENGTH(file_pattern) DESC
         """
 
-        with self._db.get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql)
-                self._patterns = cur.fetchall()
+        with self._lock:
+            now = time.monotonic()
+            if (
+                not force_refresh
+                and self._patterns is not None
+                and (now - self._last_loaded_at) < self.CACHE_TTL_SEC
+            ):
+                return self._patterns
+
+            with self._db.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql)
+                    self._patterns = cur.fetchall()
+            self._last_loaded_at = time.monotonic()
 
         return self._patterns
 

@@ -66,6 +66,9 @@ class StatusManager:
         watch_id: Optional[str] = None,
     ) -> Optional[int]:
         """Register a pending pipeline execution with optional watcher identity."""
+        # Ensure watch_id is never NULL so ON CONFLICT (watch_id, file_name)
+        # in idx_pipeline_active_watch_file atomically deduplicates concurrent claims.
+        effective_watch_id = str(watch_id or machine_id or "DEFAULT").strip()
         sql = f"""
             INSERT INTO {self.TABLE_LOG}
                 (file_name, file_size, machine_id, vehicle_model, parts_code,
@@ -88,7 +91,7 @@ class StatusManager:
                             parts_code,
                             op_no,
                             pid,
-                            watch_id,
+                            effective_watch_id,
                         ),
                     )
                     result = cur.fetchone()

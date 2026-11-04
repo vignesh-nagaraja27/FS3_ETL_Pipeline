@@ -184,12 +184,15 @@ class ChecksheetPipeline:
             )
             stable = check_file_stability(
                 source,
-                stable_required_count=int(config.get("stable_required_count", 3)),
-                stable_wait_sec=float(config.get("stable_wait_sec", 5.0)),
+                stable_required_count=int(config.get("stable_required_count", 2)),
+                stable_wait_sec=min(float(config.get("stable_wait_sec", 2.0)), 2.0),
                 poll_interval_sec=float(config.get("poll_interval_sec", 1.0)),
             )
             if not stable:
                 raise RuntimeError(f"Source workbook is not stable: {source}")
+
+            with self._db.get_connection() as lifecycle_connection:
+                ChecksheetDownloadRepository(lifecycle_connection).mark_stable(int(lifecycle_id))
 
             failed_step = "HASH"
             self._status.set_processing(

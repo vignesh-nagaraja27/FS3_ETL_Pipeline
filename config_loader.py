@@ -13,7 +13,7 @@ purely by JSON — no hardcoded values in Python logic files.
 import json
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 
 # Root path to the configs folder, relative to this file's location
@@ -22,12 +22,14 @@ _CONFIGS_DIR = Path(__file__).parent / "configs"
 
 class ConfigLoader:
     """
-    Loads and caches all JSON configuration files at startup.
+    Loads and caches all JSON configuration files at startup, and automatically
+    reloads them when their on-disk modification timestamp changes.
     Exposes helper methods to look up machine configs, part mappings, and DB settings.
     """
 
     def __init__(self, configs_dir: Path = _CONFIGS_DIR):
         self._dir = configs_dir
+        self._mtimes: Dict[str, int] = {}
         self.machines: dict = self._load("machines.json")
         self.parts_3d: list = []
         self.parts_checksheet: list = []
@@ -39,7 +41,7 @@ class ConfigLoader:
 
     def _load(self, filename: str) -> dict:
         """
-        Reads a JSON config file from the configs directory.
+        Reads a JSON config file from the configs directory and records its mtime.
         Raises a clear FileNotFoundError if the file is missing so startup fails fast.
         """
         path = self._dir / filename
@@ -48,8 +50,42 @@ class ConfigLoader:
                 f"[ConfigLoader] Missing required config file: '{path}'. "
                 f"Please create it using the template in the configs/ folder."
             )
+        stat = path.stat()
         with open(path, encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        self._mtimes[filename] = stat.st_mtime_ns
+        return data
+
+    def reload_if_changed(self) -> Dict[str, bool]:
+        """
+        Checks whether machines.json or checksheet.json have been modified on disk
+        since the last load, and reloads them safely if changed.
+
+        Returns:
+            Dict[str, bool]: Mapping of config filename to True if reloaded.
+        """
+        changed = {"machines.json": False, "checksheet.json": False}
+        machines_path = self._dir / "machines.json"
+        if machines_path.exists():
+            try:
+                mtime_ns = machines_path.stat().st_mtime_ns
+                if mtime_ns != self._mtimes.get("machines.json"):
+                    self.machines = self._load("machines.json")
+                    changed["machines.json"] = True
+            except Exception:
+                pass
+
+        checksheet_path = self._dir / "checksheet.json"
+        if checksheet_path.exists():
+            try:
+                mtime_ns = checksheet_path.stat().st_mtime_ns
+                if mtime_ns != self._mtimes.get("checksheet.json"):
+                    self.checksheet = self._load("checksheet.json")
+                    changed["checksheet.json"] = True
+            except Exception:
+                pass
+
+        return changed
 
     def match_3d_part(self, filename: str) -> Optional[dict]:
         """

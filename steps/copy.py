@@ -113,10 +113,17 @@ class CopyStep:
             )
             raise
 
-        # --- PHASE 4: Register in pre_l_3d_dldate ---
-        self._register_download(source_path.name, file_size, parts_code, context)
-
         return dest_path
+
+    def register_download(
+        self, file_name: str, file_size: int, parts_code: str, context: dict
+    ):
+        """
+        Inserts a new row into pre_l_3d_dldate to mark this file as processed.
+        Called after LOAD succeeds so failed runs or DLQ retries are never
+        falsely blocked as duplicates.
+        """
+        return self._register_download(file_name, file_size, parts_code, context)
 
     def _wait_for_stable(
         self, path: Path, interval: float, required_count: int, context: dict

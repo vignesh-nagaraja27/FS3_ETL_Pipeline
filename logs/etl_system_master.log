@@ -1,0 +1,3 @@
+[2026-11-04 18:00:39] [INFO] [PID:162344] [MC: N/A] [MODEL: N/A] [PART: N/A] [OP: N/A] - Database Connection Pool successfully initialized (min=1, max=2).
+[2026-11-04 18:00:39] [INFO] [PID:162344] [MC: N/A] [MODEL: N/A] [PART: N/A] [OP: N/A] - DB GETCONN REQUEST THREAD=MainThread
+[2026-11-04 18:00:39] [INFO] [PID:162344] [MC: N/A] [MODEL: N/A] [PART: N/A] [OP: N/A] - DB GETCONN ACQUIRED THREAD=MainThread WAIT=0.000s
