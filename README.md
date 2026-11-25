@@ -263,6 +263,8 @@ whose year is **2026**. Other years are logged and skipped before processing.
 
 The Job Runner monitors every enabled machine source folder for supported files. Ignore-prefix rules are applied before the file is classified or submitted to a worker.
 
+For 3D/CMM folders, filesystem events wake the watcher immediately, with the configured `poll_interval_sec` scan retained as a fallback for network/SMB folders. On startup, the current source-folder contents are reconciled in a separate worker pool so a large backlog does not occupy the live-arrival workers. Files already recorded as completed or rejected as an already-ingested duplicate are archived without running the ETL again; duplicate records suppress repeated submissions. New files use the live worker pool and database claims prevent concurrent duplicate processing. Successfully processed originals are moved out of the source folder during finalization.
+
 ### 2. Copy
 
 The Copy step:

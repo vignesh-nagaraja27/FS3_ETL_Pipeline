@@ -47,9 +47,25 @@ IGNORED_DIR_NAMES = {"_processing", "_completed", "_ng", "_archive", "_replay", 
 # How often the DLQ retry watcher polls for RETRYING entries (seconds)
 DLQ_POLL_INTERVAL = 15
 
-# How often configs (machines.json, checksheet.json) are checked for live reload (seconds)
+# How often the active mode's configuration is checked for live reload (seconds)
 CONFIG_RELOAD_INTERVAL = 2.0
 
+# A process owns exactly one workload mode for its entire lifetime.
+RUNNER_MODE_3D = "3D"
+RUNNER_MODE_CHECKSHEET = "CHECKSHEET"
+VALID_RUNNER_MODES = frozenset({RUNNER_MODE_3D, RUNNER_MODE_CHECKSHEET})
+
+# Fixed lock IDs are stable across Python processes and interpreter restarts.
+# Different IDs allow one 3D runner and one Checksheet runner to run together.
+SINGLETON_ADVISORY_LOCK_IDS = {
+    RUNNER_MODE_3D: 839204531,
+    RUNNER_MODE_CHECKSHEET: 839204532,
+}
+
+PIPELINE_TYPES_BY_MODE = {
+    RUNNER_MODE_3D: (PIPELINE_3D_HD, PIPELINE_3D_BL, PIPELINE_3D_CR),
+    RUNNER_MODE_CHECKSHEET: (PIPELINE_CHECKSHEET,),
+}
 
 def _fast_scan_files(root_dir: Path) -> Iterator[Tuple[Path, os.stat_result]]:
     """
@@ -80,7 +96,6 @@ def _fast_scan_files(root_dir: Path) -> Iterator[Tuple[Path, os.stat_result]]:
         except OSError:
             continue
 
-
 class _WakeEventHandler(FileSystemEventHandler):
     """Triggers an immediate scan wake-up event when OS filesystem notifications fire."""
 
@@ -92,68 +107,120 @@ class _WakeEventHandler(FileSystemEventHandler):
         if not getattr(event, "is_directory", False):
             self._wake_event.set()
 
-
 class JobRunner:
-    """
-    The central supervisor that starts and coordinates all pipeline workers.
-    """
+    """Supervises exactly one ETL workload: 3D or Checksheet."""
 
-    # Single-instance advisory lock ID to prevent two ETL processes from
-    # competing on the same database and stealing files from each other.
-    SINGLETON_ADVISORY_LOCK_ID = 839204531
-
-    def __init__(self, config: ConfigLoader):
+    def __init__(self, config: ConfigLoader, runner_mode: str):
         """
         Args:
-            config (ConfigLoader): The global configuration object loaded at startup.
+            config: Global ETL configuration loaded at process startup.
+            runner_mode: Workload owned by this process: "3D" or "CHECKSHEET".
         """
+        normalized_mode = str(runner_mode).strip().upper()
+        if normalized_mode not in VALID_RUNNER_MODES:
+            raise ValueError(
+                f"Invalid runner mode '{runner_mode}'. "
+                f"Expected one of: {sorted(VALID_RUNNER_MODES)}"
+            )
+
+        self._runner_mode = normalized_mode
         self._config = config
         self._dispatcher = Dispatcher(config)
         self._stop_event = threading.Event()
+        self._stop_lock = threading.Lock()
+        self._stopped = False
         self._config_lock = threading.RLock()
-        self._checksheet_watch_directories = self._load_checksheet_watch_directories()
-        self._checksheet_destination_root = self._get_checksheet_destination_root()
 
-        # Blocks measurement file processing while a conversion import is in progress.
+        # Only the Checksheet process loads and owns Checksheet watcher state.
+        if self._runner_mode == RUNNER_MODE_CHECKSHEET:
+            self._checksheet_watch_directories = self._load_checksheet_watch_directories()
+            self._checksheet_destination_root = self._get_checksheet_destination_root()
+        else:
+            self._checksheet_watch_directories = []
+            self._checksheet_destination_root = self._config.get_destination_root()
+
+        # 3D measurement processing pauses while a conversion import is active.
         self._conversion_lock = threading.Event()
-        self._conversion_lock.set()  # Unlocked by default
+        self._conversion_lock.set()
 
-        # Tracks DLQ entry IDs already submitted to the executor in this session.
-        self._submitted_dlq_ids: set = set()
+        # DLQ state is used only by the 3D process.
+        self._submitted_dlq_ids: Set[int] = set()
         self._dlq_id_lock = threading.Lock()
 
-        # Tracks files currently in-flight (queued or executing in worker pool)
-        # so watcher loops remain 100% non-blocking without double-submitting.
+        # In-flight paths are local to this process and therefore to this mode.
         self._in_flight_files: Set[str] = set()
         self._in_flight_lock = threading.Lock()
 
-        # Tracks active watcher threads by machine_id
+        # Watcher threads are local to this process and contain one mode only.
         self._watcher_threads: Dict[str, threading.Thread] = {}
         self._singleton_conn: Optional[Any] = None
 
-        self._pipeline_3d = Pipeline3D(destination_root=config.get_destination_root())
+        self._pipeline_3d: Optional[Pipeline3D] = None
+        self._cmm_executor: Optional[ThreadPoolExecutor] = None
+        self._checksheet_executor: Optional[ThreadPoolExecutor] = None
+        self._dlq_executor: Optional[ThreadPoolExecutor] = None
 
-        # Dedicated thread pools per workload domain to prevent resource contention.
-        # Compute worker pool size across all configured watchers (with a safe floor of 8)
-        # so enabling machines dynamically via hot-reload never starves for threads.
-        cmm_workers = sum(
-            d.get("max_workers", 2)
-            for d in config.get_watch_directories()
-        )
-        checksheet_workers = sum(
-            d.get("max_workers", 2)
-            for d in self._checksheet_watch_directories
-        )
+        if self._runner_mode == RUNNER_MODE_3D:
+            self._pipeline_3d = Pipeline3D(
+                destination_root=self._config.get_destination_root()
+            )
+            cmm_workers = sum(
+                directory.get("max_workers", 2)
+                for directory in self._config.get_watch_directories()
+            )
+            self._cmm_executor = ThreadPoolExecutor(
+                max_workers=max(cmm_workers, 8),
+                thread_name_prefix="Exec-CMM",
+            )
+            self._dlq_executor = ThreadPoolExecutor(
+                max_workers=2,
+                thread_name_prefix="Exec-DLQ",
+            )
+        else:
+            checksheet_workers = sum(
+                directory.get("max_workers", 2)
+                for directory in self._checksheet_watch_directories
+            )
+            self._checksheet_executor = ThreadPoolExecutor(
+                max_workers=max(checksheet_workers, 8),
+                thread_name_prefix="Exec-CS",
+            )
 
-        self._cmm_executor = ThreadPoolExecutor(
-            max_workers=max(cmm_workers, 8), thread_name_prefix="Exec-CMM"
-        )
-        self._checksheet_executor = ThreadPoolExecutor(
-            max_workers=max(checksheet_workers, 8), thread_name_prefix="Exec-CS"
-        )
-        self._dlq_executor = ThreadPoolExecutor(
-            max_workers=2, thread_name_prefix="Exec-DLQ"
-        )
+    def _require_mode(self, expected_mode: str, operation: str) -> None:
+        """Rejects accidental cross-mode service execution."""
+        if self._runner_mode != expected_mode:
+            raise RuntimeError(
+                f"{operation} is only valid in {expected_mode} mode; "
+                f"current mode is {self._runner_mode}."
+            )
+
+    def _get_cmm_executor(self) -> ThreadPoolExecutor:
+        """Returns the 3D executor or fails if this is not the 3D process."""
+        self._require_mode(RUNNER_MODE_3D, "3D executor access")
+        if self._cmm_executor is None:
+            raise RuntimeError("The 3D executor is not initialized.")
+        return self._cmm_executor
+
+    def _get_checksheet_executor(self) -> ThreadPoolExecutor:
+        """Returns the Checksheet executor or fails outside Checksheet mode."""
+        self._require_mode(RUNNER_MODE_CHECKSHEET, "Checksheet executor access")
+        if self._checksheet_executor is None:
+            raise RuntimeError("The Checksheet executor is not initialized.")
+        return self._checksheet_executor
+
+    def _get_dlq_executor(self) -> ThreadPoolExecutor:
+        """Returns the 3D DLQ executor or fails if it is unavailable."""
+        self._require_mode(RUNNER_MODE_3D, "DLQ executor access")
+        if self._dlq_executor is None:
+            raise RuntimeError("The 3D DLQ executor is not initialized.")
+        return self._dlq_executor
+
+    def _get_pipeline_3d(self) -> Pipeline3D:
+        """Returns the 3D pipeline or fails outside the 3D process."""
+        self._require_mode(RUNNER_MODE_3D, "3D pipeline access")
+        if self._pipeline_3d is None:
+            raise RuntimeError("The 3D pipeline is not initialized.")
+        return self._pipeline_3d
 
     def _try_acquire_in_flight(self, file_key: str) -> bool:
         """Atomically marks a file path as in-flight; returns False if already in-flight."""
@@ -228,19 +295,25 @@ class JobRunner:
         return normalized
 
     def _ensure_watcher_threads(self) -> None:
-        """
-        Starts watcher threads for any enabled machine or checksheet directory
-        that does not already have a running thread. Called at startup and on
-        live configuration reload.
-        """
+        """Starts watcher threads belonging to this process mode only."""
+        if self._runner_mode == RUNNER_MODE_3D:
+            self._ensure_3d_watcher_threads()
+        elif self._runner_mode == RUNNER_MODE_CHECKSHEET:
+            self._ensure_checksheet_watcher_threads()
+        else:
+            raise RuntimeError(f"Unsupported runner mode: {self._runner_mode}")
+
+    def _ensure_3d_watcher_threads(self) -> None:
+        """Starts enabled 3D machine watchers that are not already running."""
+        self._require_mode(RUNNER_MODE_3D, "3D watcher startup")
         with self._config_lock:
             machine_configs = list(self._config.get_watch_directories())
-            cs_configs = list(self._checksheet_watch_directories)
 
         for machine_config in machine_configs:
             machine_id = str(machine_config.get("machine_id") or "").strip()
             if not machine_id:
                 continue
+
             self._register_machine(machine_config)
             if not machine_config.get("enabled", True):
                 if machine_id not in self._watcher_threads:
@@ -260,33 +333,49 @@ class JobRunner:
             ):
                 try:
                     EnrBlockMasterStep().run(
-                        DatabaseHandler(), machine_config, 0,
-                        dict(machine="KTS-7106", model="E-NR", part="BL", pipeline_type="3D_BL"),
+                        DatabaseHandler(),
+                        machine_config,
+                        0,
+                        {
+                            "machine": "KTS-7106",
+                            "model": "E-NR",
+                            "part": "BL",
+                            "pipeline_type": PIPELINE_3D_BL,
+                        },
                     )
                 except Exception as exc:
                     LOGGER.error(
-                        f"Failed E-NR/BL master sync on startup/reload for KTS-7106: {exc}",
+                        f"Failed E-NR/BL master sync on startup/reload for "
+                        f"KTS-7106: {exc}",
                         pipeline_type="SYSTEM",
                         exc_info=True,
                     )
 
-            t = threading.Thread(
+            watcher_thread = threading.Thread(
                 target=self._watch_machine_folder,
                 args=(machine_config,),
                 name=f"Watcher-{machine_id}",
                 daemon=True,
             )
-            t.start()
-            self._watcher_threads[machine_id] = t
+            watcher_thread.start()
+            self._watcher_threads[machine_id] = watcher_thread
             LOGGER.info(
-                f"[MACHINE WATCHER START] {machine_id} -> {machine_config.get('source_path')}",
+                f"[3D WATCHER START] {machine_id} -> "
+                f"{machine_config.get('source_path')}",
                 pipeline_type="SYSTEM",
             )
 
-        for machine_config in cs_configs:
+    def _ensure_checksheet_watcher_threads(self) -> None:
+        """Starts enabled Checksheet watchers that are not already running."""
+        self._require_mode(RUNNER_MODE_CHECKSHEET, "Checksheet watcher startup")
+        with self._config_lock:
+            machine_configs = list(self._checksheet_watch_directories)
+
+        for machine_config in machine_configs:
             machine_id = str(machine_config.get("machine_id") or "").strip()
             if not machine_id:
                 continue
+
             self._register_machine(machine_config)
             if not machine_config.get("enabled", True):
                 if machine_id not in self._watcher_threads:
@@ -301,46 +390,67 @@ class JobRunner:
                 continue
 
             LOGGER.info(
-                f"[CHECKSHEET WATCHER START] {machine_id} -> {machine_config.get('source_path')}",
+                f"[CHECKSHEET WATCHER START] {machine_id} -> "
+                f"{machine_config.get('source_path')}",
                 pipeline_type="SYSTEM",
             )
-            t = threading.Thread(
+            watcher_thread = threading.Thread(
                 target=self._watch_checksheet_folder,
                 args=(machine_config,),
                 name=f"Watcher-Checksheet-{machine_id}",
                 daemon=True,
             )
-            t.start()
-            self._watcher_threads[machine_id] = t
+            watcher_thread.start()
+            self._watcher_threads[machine_id] = watcher_thread
 
     def _reload_configs_if_needed(self) -> None:
-        """Hot-reloads machines.json and checksheet.json if modified on disk."""
+        """Applies live configuration changes for this process mode only."""
         changed = self._config.reload_if_changed()
-        if not any(changed.values()):
+        if not changed or not any(changed.values()):
             return
 
+        relevant_change = False
         with self._config_lock:
-            if changed.get("checksheet.json"):
-                self._checksheet_watch_directories = self._load_checksheet_watch_directories()
-                self._checksheet_destination_root = self._get_checksheet_destination_root()
+            if (
+                self._runner_mode == RUNNER_MODE_CHECKSHEET
+                and changed.get("checksheet.json")
+            ):
+                self._checksheet_watch_directories = (
+                    self._load_checksheet_watch_directories()
+                )
+                self._checksheet_destination_root = (
+                    self._get_checksheet_destination_root()
+                )
+                relevant_change = True
                 LOGGER.info(
-                    f"[CONFIG RELOAD] Reloaded checksheet.json ({len(self._checksheet_watch_directories)} watchers).",
+                    f"[CONFIG RELOAD] Reloaded checksheet.json "
+                    f"({len(self._checksheet_watch_directories)} watchers).",
                     pipeline_type="SYSTEM",
                 )
-            if changed.get("machines.json"):
-                self._pipeline_3d = Pipeline3D(destination_root=self._config.get_destination_root())
+            elif (
+                self._runner_mode == RUNNER_MODE_3D
+                and changed.get("machines.json")
+            ):
+                self._pipeline_3d = Pipeline3D(
+                    destination_root=self._config.get_destination_root()
+                )
+                relevant_change = True
                 LOGGER.info(
-                    f"[CONFIG RELOAD] Reloaded machines.json ({len(self._config.get_watch_directories())} machines).",
+                    f"[CONFIG RELOAD] Reloaded machines.json "
+                    f"({len(self._config.get_watch_directories())} machines).",
                     pipeline_type="SYSTEM",
                 )
 
-        self._ensure_watcher_threads()
+        if relevant_change:
+            self._ensure_watcher_threads()
 
     def _acquire_singleton_instance_lock(self) -> None:
         """
-        Acquires a session-level PostgreSQL advisory lock so that only ONE
-        ETL JobRunner instance can run against the configured database at a time.
-        Also logs the exact target host and dbname at startup for full visibility.
+        Acquires the PostgreSQL advisory lock assigned to this process mode.
+
+        One 3D process and one Checksheet process may run concurrently, while a
+        duplicate process for either mode is rejected. Lock failures are fatal:
+        processing never starts unless this process proves lock ownership.
         """
         import psycopg2
 
@@ -348,11 +458,19 @@ class JobRunner:
         host = db_cfg.get("host", "localhost")
         port = db_cfg.get("port", 5432)
         dbname = db_cfg.get("dbname", "")
+        lock_id = SINGLETON_ADVISORY_LOCK_IDS[self._runner_mode]
+        application_name = (
+            f"FS3-ETL-{self._runner_mode}-Supervisor-PID-{os.getpid()}"
+        )
+
         LOGGER.info(
-            f"[DB TARGET] Connecting ETL JobRunner (PID={os.getpid()}) to "
+            f"[DB TARGET] Connecting {self._runner_mode} JobRunner "
+            f"(PID={os.getpid()}, lock_id={lock_id}) to "
             f"host={host}:{port} dbname='{dbname}'",
             pipeline_type="SYSTEM",
         )
+
+        conn: Optional[Any] = None
         try:
             conn = psycopg2.connect(
                 host=host,
@@ -360,153 +478,177 @@ class JobRunner:
                 dbname=dbname,
                 user=db_cfg.get("user"),
                 password=db_cfg.get("password"),
-                application_name=f"FS3-ETL-Supervisor-PID-{os.getpid()}",
+                application_name=application_name,
             )
             conn.autocommit = True
+
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT pg_try_advisory_lock(%s);",
-                    (self.SINGLETON_ADVISORY_LOCK_ID,),
-                )
+                cur.execute("SELECT pg_try_advisory_lock(%s);", (lock_id,))
                 row = cur.fetchone()
                 acquired = bool(row and row[0])
+
                 if not acquired:
                     cur.execute(
                         """
-                        SELECT pid, client_addr, application_name, backend_start
-                        FROM pg_stat_activity
-                        WHERE datname = current_database()
-                          AND pid IN (
-                              SELECT pid FROM pg_locks
-                              WHERE locktype = 'advisory'
-                                AND objid = %s
-                                AND granted = true
-                          );
+                        SELECT
+                            a.pid,
+                            a.client_addr,
+                            a.application_name,
+                            a.backend_start
+                        FROM pg_stat_activity AS a
+                        INNER JOIN pg_locks AS l ON l.pid = a.pid
+                        WHERE a.datname = current_database()
+                          AND l.locktype = 'advisory'
+                          AND l.objid = %s
+                          AND l.granted = true;
                         """,
-                        (self.SINGLETON_ADVISORY_LOCK_ID,),
+                        (lock_id,),
                     )
                     holder = cur.fetchone()
-                    conn.close()
                     raise RuntimeError(
-                        f"Another ETL JobRunner instance is already running against "
-                        f"database '{dbname}' on {host}:{port} (lock holder={holder}). "
-                        f"Stop the existing ETL process before starting a new one."
+                        f"Another {self._runner_mode} ETL JobRunner instance is "
+                        f"already running against database '{dbname}' on "
+                        f"{host}:{port} (lock_id={lock_id}, holder={holder}). "
+                        f"Stop the existing {self._runner_mode} process before "
+                        f"starting another one."
                     )
+
             self._singleton_conn = conn
             LOGGER.info(
-                f"[SINGLETON LOCK ACQUIRED] Exclusive ETL supervisor lock acquired on dbname='{dbname}'.",
+                f"[SINGLETON LOCK ACQUIRED] mode={self._runner_mode} "
+                f"lock_id={lock_id} dbname='{dbname}'.",
                 pipeline_type="SYSTEM",
             )
-        except RuntimeError:
+        except Exception:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
             raise
-        except Exception as exc:
-            LOGGER.warning(
-                f"Could not acquire advisory singleton lock: {exc}",
-                pipeline_type="SYSTEM",
-            )
 
-    def start(self):
-        """
-        Starts all watcher threads and blocks until a shutdown signal is received.
-        """
+    def start(self) -> None:
+        """Starts this process mode and blocks until shutdown."""
         LOGGER.info("=" * 60, pipeline_type="SYSTEM")
-        LOGGER.info("ETL Job Runner starting up.", pipeline_type="SYSTEM")
+        LOGGER.info(
+            f"ETL Job Runner starting. Mode={self._runner_mode}",
+            pipeline_type="SYSTEM",
+        )
         LOGGER.info("=" * 60, pipeline_type="SYSTEM")
 
-        # Ensure only one ETL JobRunner instance runs against this database
-        self._acquire_singleton_instance_lock()
-
-        # STARTUP CLEANUP: Reset stale PROCESSING rows
-        self._cleanup_stale_tasks()
-
-        # Start machine & checksheet watcher threads (and register all in DB)
-        self._ensure_watcher_threads()
-
-        # Start the Checksheet database-backed retry recovery watcher thread
-        t_cs_retry = threading.Thread(
-            target=self._watch_checksheet_retries,
-            name="Watcher-Checksheet-Retry",
-            daemon=True,
-        )
-        t_cs_retry.start()
-
-        # Start the conversion table watcher thread
-        conv_config = self._config.get_conversion_watch()
-        if conv_config.get("enabled", True):
-            t_conv = threading.Thread(
-                target=self._watch_conversion_folder,
-                args=(conv_config,),
-                name="Watcher-ConversionTable",
-                daemon=True,
-            )
-            t_conv.start()
-
-        # Start the DLQ retry watcher thread
-        t_dlq = threading.Thread(
-            target=self._watch_dlq_retrying, name="Watcher-DLQ-Retry", daemon=True
-        )
-        t_dlq.start()
-
-        last_config_check = time.monotonic()
         try:
+            self._acquire_singleton_instance_lock()
+            self._cleanup_stale_tasks()
+            self._ensure_watcher_threads()
+
+            if self._runner_mode == RUNNER_MODE_CHECKSHEET:
+                checksheet_retry_thread = threading.Thread(
+                    target=self._watch_checksheet_retries,
+                    name="Watcher-Checksheet-Retry",
+                    daemon=True,
+                )
+                checksheet_retry_thread.start()
+            else:
+                conversion_config = self._config.get_conversion_watch()
+                if conversion_config.get("enabled", True):
+                    conversion_thread = threading.Thread(
+                        target=self._watch_conversion_folder,
+                        args=(conversion_config,),
+                        name="Watcher-ConversionTable",
+                        daemon=True,
+                    )
+                    conversion_thread.start()
+
+                dlq_thread = threading.Thread(
+                    target=self._watch_dlq_retrying,
+                    name="Watcher-DLQ-Retry",
+                    daemon=True,
+                )
+                dlq_thread.start()
+
+            last_config_check = time.monotonic()
             while not self._stop_event.is_set():
-                time.sleep(1)
-                if (time.monotonic() - last_config_check) >= CONFIG_RELOAD_INTERVAL:
+                self._stop_event.wait(1.0)
+                if (
+                    time.monotonic() - last_config_check
+                    >= CONFIG_RELOAD_INTERVAL
+                ):
                     last_config_check = time.monotonic()
                     self._reload_configs_if_needed()
         except KeyboardInterrupt:
             LOGGER.info(
-                "Shutdown signal received. Stopping watchers...",
+                f"Shutdown signal received for mode={self._runner_mode}.",
                 pipeline_type="SYSTEM",
             )
+        finally:
             self.stop()
 
-    def stop(self):
-        """Signals all threads to stop and shuts down all workload thread pools."""
+    def stop(self) -> None:
+        """Stops this mode's threads, executors, database pool, and advisory lock."""
+        with self._stop_lock:
+            if self._stopped:
+                return
+            self._stopped = True
+
         self._stop_event.set()
-        self._cmm_executor.shutdown(wait=True)
-        self._checksheet_executor.shutdown(wait=True)
-        self._dlq_executor.shutdown(wait=True)
+
+        for executor in (
+            self._cmm_executor,
+            self._checksheet_executor,
+            self._dlq_executor,
+        ):
+            if executor is not None:
+                executor.shutdown(wait=True)
+
         if self._singleton_conn is not None:
             try:
                 self._singleton_conn.close()
             except Exception:
                 pass
             self._singleton_conn = None
-        DatabaseHandler().close_all()
-        LOGGER.info("ETL Job Runner shut down cleanly.", pipeline_type="SYSTEM")
 
-    def _cleanup_stale_tasks(self):
-        """Resets rows stuck in PROCESSING to STALE on startup and during periodic health checks."""
-        sql = """
+        DatabaseHandler().close_all()
+        LOGGER.info(
+            f"ETL Job Runner shut down cleanly. Mode={self._runner_mode}",
+            pipeline_type="SYSTEM",
+        )
+
+    def _cleanup_stale_tasks(self) -> None:
+        """Marks only this mode's abandoned PROCESSING rows as STALE."""
+        pipeline_types = PIPELINE_TYPES_BY_MODE[self._runner_mode]
+        placeholders = ", ".join(["%s"] * len(pipeline_types))
+        sql = f"""
             UPDATE fs3.etl_pipeline_log
             SET status       = 'STALE',
                 current_step = 'STALE_RESET',
                 updated_at   = NOW()
             WHERE status = 'PROCESSING'
-            AND updated_at < NOW() - INTERVAL '30 minutes'
+              AND updated_at < NOW() - INTERVAL '30 minutes'
+              AND pipeline_type IN ({placeholders})
             RETURNING id, file_name;
         """
         try:
             db = DatabaseHandler()
             with db.get_connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute(sql)
+                    cur.execute(sql, pipeline_types)
                     stale_rows = cur.fetchall()
 
             if stale_rows:
                 LOGGER.warning(
-                    f"STARTUP CLEANUP: Reset {len(stale_rows)} stale records.",
+                    f"STALE CLEANUP: mode={self._runner_mode} reset "
+                    f"{len(stale_rows)} stale records.",
                     pipeline_type="SYSTEM",
                 )
-        except Exception as e:
+        except Exception as exc:
             LOGGER.warning(
-                f"STARTUP CLEANUP: Error resetting stale records: {e}",
+                f"STALE CLEANUP: mode={self._runner_mode} failed: {exc}",
                 pipeline_type="SYSTEM",
             )
 
     def _watch_checksheet_retries(self):
-        """Polls fs3.pre_l_measurement_processing_lock for pending retries and stale processing tasks across restarts."""
+        """Polls Checksheet retries and stale tasks across process restarts."""
+        self._require_mode(RUNNER_MODE_CHECKSHEET, "Checksheet retry watcher")
         while not self._stop_event.is_set():
             try:
                 self._cleanup_stale_tasks()
@@ -559,7 +701,7 @@ class JobRunner:
                         pipeline_type="SYSTEM",
                     )
 
-                    self._checksheet_executor.submit(
+                    self._get_checksheet_executor().submit(
                         self._run_pipeline_safe,
                         target_file_path,
                         pipeline_type,
@@ -610,7 +752,7 @@ class JobRunner:
                         pipeline_type="SYSTEM",
                     )
 
-                    self._checksheet_executor.submit(
+                    self._get_checksheet_executor().submit(
                         self._run_pipeline_safe,
                         target_file_path,
                         pipeline_type,
@@ -631,7 +773,8 @@ class JobRunner:
             self._stop_event.wait(15)
 
     def _watch_dlq_retrying(self):
-        """Polls DLQ for 'RETRYING' entries and submits them to the DLQ executor."""
+        """Polls the 3D DLQ for RETRYING entries."""
+        self._require_mode(RUNNER_MODE_3D, "3D DLQ watcher")
         while not self._stop_event.is_set():
             try:
                 db = DatabaseHandler()
@@ -680,7 +823,7 @@ class JobRunner:
                                 pipeline_type="SYSTEM",
                             )
 
-                        self._dlq_executor.submit(
+                        self._get_dlq_executor().submit(
                             self._run_pipeline_retry_safe,
                             file_path,
                             pipeline_type,
@@ -715,10 +858,15 @@ class JobRunner:
         pipeline_log_id: int,
         dlq_id: int,
     ):
-        """Wrapper for DLQ retry pipeline runs."""
+        """Wrapper for 3D DLQ retry pipeline runs."""
+        self._require_mode(RUNNER_MODE_3D, "3D DLQ retry execution")
+        if pipeline_type not in PIPELINE_TYPES_BY_MODE[RUNNER_MODE_3D]:
+            raise RuntimeError(
+                f"DLQ pipeline type '{pipeline_type}' is not a 3D pipeline."
+            )
         machine_id = str(machine_config.get("machine_id", "UNKNOWN"))
         try:
-            self._pipeline_3d.run(
+            self._get_pipeline_3d().run(
                 source_path=file_path,
                 part_config=part_config,
                 machine_config=machine_config,
@@ -766,6 +914,7 @@ class JobRunner:
         - Tracks file state by (size, mtime_ns) rather than permanent path strings so
           overwritten, re-dropped, or retried files are always picked up immediately.
         """
+        self._require_mode(RUNNER_MODE_3D, "3D machine watcher")
         machine_id = str(initial_machine_config["machine_id"])
         # Maps file_key -> (st_size, st_mtime_ns) of files known to be processed or permanently skipped
         seen_file_states: Dict[str, Tuple[int, int]] = {}
@@ -891,7 +1040,7 @@ class JobRunner:
                             f"[CMM JOB SUBMITTED] {file_path.name} -> {pipeline_type} [{machine_id}]",
                             pipeline_type="SYSTEM",
                         )
-                        self._cmm_executor.submit(
+                        self._get_cmm_executor().submit(
                             self._run_pipeline_safe,
                             file_path,
                             pipeline_type,
@@ -931,6 +1080,7 @@ class JobRunner:
           (ChecksheetPipeline.run) so the watcher thread never blocks and picks up new
           files within 1-2 seconds.
         """
+        self._require_mode(RUNNER_MODE_CHECKSHEET, "Checksheet folder watcher")
         machine_id = str(initial_machine_config["machine_id"])
         # Maps file_key -> (st_size, st_mtime_ns, last_checked_epoch)
         known_file_stats: Dict[str, Tuple[int, int, float]] = {}
@@ -1107,7 +1257,7 @@ class JobRunner:
                             f"[CHECKSHEET JOB SUBMITTED] {file_path.name} -> {pipeline_type} [{machine_id}]",
                             pipeline_type="SYSTEM",
                         )
-                        self._checksheet_executor.submit(
+                        self._get_checksheet_executor().submit(
                             self._run_pipeline_safe,
                             file_path,
                             pipeline_type,
@@ -1143,7 +1293,8 @@ class JobRunner:
                     pass
 
     def _watch_conversion_folder(self, conv_config: dict):
-        """Monitors the conversion table Excel folder."""
+        """Monitors the 3D conversion table Excel folder."""
+        self._require_mode(RUNNER_MODE_3D, "3D conversion watcher")
         conv_path = Path(conv_config["path"])
         poll_interval = conv_config.get("poll_interval_sec", 10)
         seen_files: Dict[str, Tuple[int, int]] = {}
@@ -1216,19 +1367,25 @@ class JobRunner:
         part_config: Dict[Any, Any],
         machine_config: dict,
         in_flight_key: Optional[str] = None,
-    ):
-        """Catches top-level exceptions from a normal pipeline run and releases in-flight lock."""
+    ) -> None:
+        """Runs one job only when its pipeline type belongs to this process mode."""
         machine_id = str(machine_config.get("machine_id", "UNKNOWN"))
         try:
-            if pipeline_type in (PIPELINE_3D_HD, PIPELINE_3D_BL, PIPELINE_3D_CR):
-                self._pipeline_3d.run(
+            allowed_pipeline_types = PIPELINE_TYPES_BY_MODE[self._runner_mode]
+            if pipeline_type not in allowed_pipeline_types:
+                raise RuntimeError(
+                    f"Pipeline type '{pipeline_type}' does not belong to "
+                    f"runner mode {self._runner_mode}."
+                )
+
+            if self._runner_mode == RUNNER_MODE_3D:
+                self._get_pipeline_3d().run(
                     source_path=file_path,
                     part_config=part_config,
                     machine_config=machine_config,
                     pipeline_type=pipeline_type,
                 )
-                self._increment_registry_counter(machine_id, success=True)
-            elif pipeline_type == PIPELINE_CHECKSHEET:
+            else:
                 pipeline = cast(
                     ChecksheetPipeline,
                     self._dispatcher.dispatch(
@@ -1240,15 +1397,11 @@ class JobRunner:
                     ),
                 )
                 pipeline.run(source_path=file_path, watch_config=machine_config)
-                self._increment_registry_counter(machine_id, success=True)
-            else:
-                LOGGER.warning(
-                    f"No pipeline for type '{pipeline_type}'. Skip: '{file_path.name}'",
-                    pipeline_type="SYSTEM",
-                )
-        except Exception as e:
+
+            self._increment_registry_counter(machine_id, success=True)
+        except Exception as exc:
             LOGGER.error(
-                f"Pipeline error for '{file_path.name}': {e}",
+                f"Pipeline error for '{file_path.name}': {exc}",
                 pipeline_type="SYSTEM",
                 exc_info=True,
             )

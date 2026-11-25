@@ -100,12 +100,31 @@ def main():
 
     # ── STEP 3: Start the Orchestrator ───────────────────────────────────────
     try:
-        runner = JobRunner(config=config)
-        runner.start()  # Blocks here until Ctrl+C
+       runner = JobRunner(
+        config=config,
+        runner_mode="3D",
+    )
+       runner.start()  # Blocks here until Ctrl+C
     except Exception as e:
-        LOGGER.critical(f"FATAL: Job Runner crashed unexpectedly: {e}", pipeline_type="SYSTEM",exc_info=True)
-        sys.exit(1)
-
+        LOGGER.critical(
+        f"FATAL: 3D Job Runner crashed unexpectedly: {e}",
+        pipeline_type="SYSTEM",
+        exc_info=True,
+    )
+    sys.exit(1)
+    #  try:
+    #      runner = JobRunner(
+    #     config=config,
+    #     runner_mode="CHECKSHEET",
+    # )
+    #      runner.start()  # Blocks here until Ctrl+C
+    # except Exception as e:
+    #    LOGGER.critical(
+    #     f"FATAL: Checksheet Job Runner crashed unexpectedly: {e}",
+    #     pipeline_type="SYSTEM",
+    #     exc_info=True,
+    # )
+    # sys.exit(1)
 
 if __name__ == "__main__":
     main()
